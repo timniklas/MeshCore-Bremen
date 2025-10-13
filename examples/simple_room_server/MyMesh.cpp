@@ -38,6 +38,15 @@ struct ServerStats {
   uint16_t n_posted, n_post_push;
 };
 
+void MyMesh::addPostFrom(const mesh::Identity &author, const char *postData) {
+  posts[next_post_idx].author = author; // Autor explizit setzen
+  StrHelper::strncpy(posts[next_post_idx].text, postData, MAX_POST_TEXT_LEN);
+  posts[next_post_idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
+  next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
+  _num_posted++; // stats
+}
+
 void MyMesh::addPost(ClientInfo *client, const char *postData) {
   // TODO: suggested postData format: <title>/<descrption>
   posts[next_post_idx].author = client->id; // add to cyclic queue
@@ -765,6 +774,41 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
+  } else if (sender_timestamp == 0 && memcmp(command, "postself ", 9) == 0) {
+    const char* text = command + 9;
+    while (*text == ' ') text++;
+    if (*text == '\0') strcpy(reply, "Err - empty message");
+    else { addPostFrom(self_id, text); strcpy(reply, "OK"); }
+  } else if (sender_timestamp == 0 && memcmp(command, "postfrom ", 9) == 0) {
+    // Syntax: postfrom <PUBKEY_HEX> <text>
+    char* hex = command + 9;
+    while (*hex == ' ') hex++;
+
+    char* sp = strchr(hex, ' ');
+    if (!sp) {
+      strcpy(reply, "Err - need <pubkey-hex> <text>");
+    } else {
+      *sp++ = 0; // split hex / text
+      while (*sp == ' ') sp++; // trim
+
+      const int expected_hex_len = PUB_KEY_SIZE * 2;
+      if ((int)strlen(hex) != expected_hex_len) {
+        strcpy(reply, "Err - pubkey length");
+      } else {
+        uint8_t pubkey[PUB_KEY_SIZE];
+        if (!mesh::Utils::fromHex(pubkey, PUB_KEY_SIZE, hex)) {
+          strcpy(reply, "Err - bad pubkey");
+        } else {
+          mesh::Identity author{};
+          memcpy(author.pub_key, pubkey, PUB_KEY_SIZE);
+          if (*sp == '\0') {
+            strcpy(reply, "Err - empty message");
+          } else {
+            addPostFrom(author, sp);
+            strcpy(reply, "OK");
+          }
+        }
+      }
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
