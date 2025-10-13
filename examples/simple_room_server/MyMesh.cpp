@@ -438,7 +438,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           temp[5] = 0;      // no reply
           send_ack = false; // and no ACK...  user shoudn't be sending these
         }
-      else { // TXT_TYPE_PLAIN
+      } else { // TXT_TYPE_PLAIN
         if ((client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
           temp[5] = 0;      // no reply
           send_ack = false; // no ACK
@@ -461,6 +461,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           }
           temp[5] = 0; // no reply (ACK is enough)
           send_ack = true;
+        }
       }
 
       uint32_t delay_millis;
