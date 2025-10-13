@@ -780,35 +780,46 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     if (*text == '\0') strcpy(reply, "Err - empty message");
     else { addPostFrom(self_id, text); strcpy(reply, "OK"); }
   } else if (sender_timestamp == 0 && memcmp(command, "postfrom ", 9) == 0) {
-    // Syntax: postfrom <PUBKEY_HEX> <text>
-    char* hex = command + 9;
-    while (*hex == ' ') hex++;
-
-    char* sp = strchr(hex, ' ');
+    // Syntax: postfrom <PUBKEY_HEX_PARTIAL> <text>
+    char* idstr = command + 9;
+    while (*idstr == ' ') idstr++;
+    char* sp = strchr(idstr, ' ');
     if (!sp) {
       strcpy(reply, "Err - need <pubkey-hex> <text>");
-    } else {
-      *sp++ = 0; // split hex / text
-      while (*sp == ' ') sp++; // trim
-
-      const int expected_hex_len = PUB_KEY_SIZE * 2;
-      if ((int)strlen(hex) != expected_hex_len) {
-        strcpy(reply, "Err - pubkey length");
-      } else {
-        uint8_t pubkey[PUB_KEY_SIZE];
-        if (!mesh::Utils::fromHex(pubkey, PUB_KEY_SIZE, hex)) {
-          strcpy(reply, "Err - bad pubkey");
-        } else {
-          mesh::Identity author{};
-          memcpy(author.pub_key, pubkey, PUB_KEY_SIZE);
-          if (*sp == '\0') {
-            strcpy(reply, "Err - empty message");
-          } else {
-            addPostFrom(author, sp);
-            strcpy(reply, "OK");
-          }
-        }
+      return;
+    }
+    *sp++ = 0;
+    while (*sp == ' ') sp++;
+    size_t hexlen = strlen(idstr);
+    if (hexlen == 0) {
+      strcpy(reply, "Err - empty pubkey");
+      return;
+    }
+    if ((hexlen & 1) != 0) {
+      strcpy(reply, "Err - pubkey hex must have even length");
+      return;
+    }
+    if (hexlen > (size_t)PUB_KEY_SIZE * 2) {
+      strcpy(reply, "Err - pubkey too long");
+      return;
+    }
+    if (*sp == '\0') {
+      strcpy(reply, "Err - empty message");
+      return;
+    }
+    uint8_t pubkey[PUB_KEY_SIZE];
+    memset(pubkey, 0, sizeof(pubkey)); // Zero-Pad für den Rest
+    size_t nbytes = hexlen / 2;
+    if (nbytes > 0) {
+      if (!mesh::Utils::fromHex(pubkey, (int)nbytes, idstr)) {
+        strcpy(reply, "Err - bad pubkey hex");
+        return;
       }
+    }
+    mesh::Identity author{};
+    memcpy(author.pub_key, pubkey, PUB_KEY_SIZE);
+    addPostFrom(author, sp);
+    strcpy(reply, "OK");
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
