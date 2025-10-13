@@ -461,7 +461,6 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           }
           temp[5] = 0; // no reply (ACK is enough)
           send_ack = true;
-        }
       }
 
       uint32_t delay_millis;
