@@ -1,4 +1,6 @@
 #include "MyMesh.h"
+#include <base64.hpp>
+#include <cstring>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -37,6 +39,57 @@ struct ServerStats {
   uint16_t n_direct_dups, n_flood_dups;
   uint16_t n_posted, n_post_push;
 };
+
+static bool base64_encode(const uint8_t* in, size_t in_len,
+                          char* out, size_t out_sz, size_t* out_len) {
+  // benötigte Länge (ohne NUL)
+  unsigned int need = static_cast<unsigned int>(((in_len + 2) / 3) * 4);
+  if (need + 1 > out_sz) return false; // +1 für '\0'
+
+  unsigned int n = encode_base64(
+      reinterpret_cast<const unsigned char*>(in),
+      static_cast<unsigned int>(in_len),
+      reinterpret_cast<unsigned char*>(out));
+
+  if (n + 1 > out_sz) return false;
+  out[n] = '\0';
+  if (out_len) *out_len = n;
+  return true;
+}
+
+static bool base64_decode(const char* in, uint8_t* out,
+                          size_t out_sz, size_t* out_len) {
+  // grobe Obergrenze prüfen (Base64 4:3)
+  unsigned int slen = static_cast<unsigned int>(std::strlen(in));
+  unsigned int need = (slen / 4) * 3;
+  if (need > out_sz) return false;
+
+  unsigned int n = decode_base64(
+      reinterpret_cast<const unsigned char*>(in),
+      reinterpret_cast<unsigned char*>(out));
+
+  if (n > out_sz) return false;
+  if (out_len) *out_len = n;
+  return true;
+}
+
+static bool try_decode_b64_text(const char* in, char* out, size_t out_sz) {
+  if (strncmp(in, "b64:", 4) != 0) return false;
+  const char* b64 = in + 4;
+  size_t dec_len = 0;
+  if (!base64_decode(b64, (uint8_t*)out, out_sz - 1, &dec_len)) return false;
+  out[dec_len] = '\0';
+  return true;
+}
+
+void MyMesh::addPostFrom(const mesh::Identity &author, const char *postData) {
+  posts[next_post_idx].author = author; // Autor explizit setzen
+  StrHelper::strncpy(posts[next_post_idx].text, postData, MAX_POST_TEXT_LEN);
+  posts[next_post_idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
+  next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
+  _num_posted++; // stats
+}
 
 void MyMesh::addPost(ClientInfo *client, const char *postData) {
   // TODO: suggested postData format: <title>/<descrption>
@@ -435,7 +488,27 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           send_ack = false; // no ACK
         } else {
           if (!is_retry) {
-            addPost(client, (const char *)&data[5]);
+            // Log incoming chat message from client
+            const char* msg = (const char*)&data[5];
+
+            char b64buf[((MAX_POST_TEXT_LEN + 2) / 3) * 4 + 1]; // worst-case + '\0'
+            size_t msglen = strnlen(msg, MAX_POST_TEXT_LEN);
+
+            if (msglen > 0) {
+              size_t out_len = 0;
+              if (base64_encode((const uint8_t*)msg, msglen, b64buf, sizeof(b64buf), &out_len)) {
+                b64buf[out_len] = '\0';
+                Serial.printf("CHATB64 FROM %02X%02X%02X%02X %s\n",
+                              client->id.pub_key[0],
+                              client->id.pub_key[1],
+                              client->id.pub_key[2],
+                              client->id.pub_key[3],
+                              b64buf);
+              }
+            }
+
+            // Store it in the post list
+            addPost(client, msg);
           }
           temp[5] = 0; // no reply (ACK is enough)
           send_ack = true;
@@ -765,6 +838,38 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
+  } else if (sender_timestamp == 0 && memcmp(command, "postself ", 9) == 0) {
+    const char* p = command + 9; while (*p==' ') p++;
+    if (*p == '\0') { strcpy(reply, "Err - empty message"); return; }
+
+    char text_buf[MAX_POST_TEXT_LEN];
+    if (!try_decode_b64_text(p, text_buf, sizeof(text_buf))) {
+      StrHelper::strncpy(text_buf, p, sizeof(text_buf));
+    }
+
+    addPostFrom(self_id, text_buf);
+    strcpy(reply, "OK");
+  } else if (sender_timestamp == 0 && memcmp(command, "postfrom ", 9) == 0) {
+    char* idstr = command + 9; while (*idstr==' ') idstr++;
+    char* sp = strchr(idstr, ' ');
+    if (!sp) { strcpy(reply, "Err - need <pubkey-hex> <text>"); return; }
+    *sp++ = 0; while (*sp==' ') sp++;
+
+    // pubkey (kann kurz sein; wir paddden mit 0x00)
+    size_t hexlen = strlen(idstr);
+    if ((hexlen & 1) != 0 || hexlen > (size_t)PUB_KEY_SIZE*2) { strcpy(reply, "Err - bad pubkey hex len"); return; }
+    uint8_t pubkey[PUB_KEY_SIZE]; memset(pubkey, 0, sizeof(pubkey));
+    if (hexlen && !mesh::Utils::fromHex(pubkey, (int)(hexlen/2), idstr)) { strcpy(reply, "Err - bad pubkey hex"); return; }
+
+    // text (plain oder b64)
+    char text_buf[MAX_POST_TEXT_LEN];
+    if (!try_decode_b64_text(sp, text_buf, sizeof(text_buf))) {
+      StrHelper::strncpy(text_buf, sp, sizeof(text_buf));
+    }
+
+    mesh::Identity author{}; memcpy(author.pub_key, pubkey, PUB_KEY_SIZE);
+    addPostFrom(author, text_buf);
+    strcpy(reply, "OK");
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
