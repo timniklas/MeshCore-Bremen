@@ -438,13 +438,26 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           temp[5] = 0;      // no reply
           send_ack = false; // and no ACK...  user shoudn't be sending these
         }
-      } else { // TXT_TYPE_PLAIN
+      else { // TXT_TYPE_PLAIN
         if ((client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
           temp[5] = 0;      // no reply
           send_ack = false; // no ACK
         } else {
           if (!is_retry) {
-            addPost(client, (const char *)&data[5]);
+            // Log incoming chat message from client
+            const char *msg = (const char *)&data[5];
+            const char *ts = getLogDateTime();
+
+            Serial.printf("%s CHAT FROM %02X%02X%02X%02X: %s\n",
+                          ts,
+                          client->id.pub_key[0],
+                          client->id.pub_key[1],
+                          client->id.pub_key[2],
+                          client->id.pub_key[3],
+                          msg);
+
+            // Store it in the post list
+            addPost(client, msg);
           }
           temp[5] = 0; // no reply (ACK is enough)
           send_ack = true;
