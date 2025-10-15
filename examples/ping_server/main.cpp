@@ -279,47 +279,44 @@ protected:
       body = bodybuf;
     }
 
-  // Ping erkannt -> öffentliches Echo senden
-  if (startsWithIgnoreCase(body, "ping")) {
-    const char* suffix = body + 4;
-    while (*suffix == ' ') suffix++;
+    // Ping erkannt -> öffentliches Echo senden
+    if (startsWithIgnoreCase(body, "ping")) {
+      char snr_str[12];
+      dtostrf(pkt->getSNR(), 0, 1, snr_str);
 
-    // SNR formatieren
-    char snr_str[12];
-    dtostrf(pkt->getSNR(), 0, 1, snr_str);
+      char route_str[24];
+      if (pkt->isRouteDirect() || pkt->path_len == 0) {
+        strcpy(route_str, "direct");
+      } else {
+        snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pkt->path_len);
+      }
 
-    // Route-Info (bei Public meist Flood, aber wir prüfen trotzdem)
-    char route_str[24];
-    if (pkt->isRouteDirect()) {
-      strcpy(route_str, "direct");
-    } else {
-      snprintf(route_str, sizeof(route_str), "hops:%u", (unsigned)pkt->path_len);
+      char replyText[MAX_TEXT_LEN];
+      snprintf(replyText, sizeof(replyText),
+              "ECHO: %s (SNR: %s dB, Route: %s)",
+              body, snr_str, route_str);
+
+      Serial.printf("   Received public ping -> echoing \"%s\"\n", replyText);
+
+      uint8_t temp[5 + MAX_TEXT_LEN + 32];
+      uint32_t now = getRTCClock()->getCurrentTime();
+      memcpy(temp, &now, 4);
+      temp[4] = 0;
+
+      snprintf((char*)&temp[5], MAX_TEXT_LEN,
+              "%s: %s", _prefs.node_name, replyText);
+      temp[5 + MAX_TEXT_LEN] = 0;
+
+      int len = strlen((char*)&temp[5]);
+      auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
+                                      _public->channel, temp, 5 + len);
+      if (pkt2) {
+        sendFlood(pkt2);
+        Serial.println("   (public echo sent)");
+      } else {
+        Serial.println("   ERROR: unable to send public echo");
+      }
     }
-
-    char replyText[MAX_TEXT_LEN];
-    snprintf(replyText, sizeof(replyText),
-            "ECHO: ping%s%s (snr:%s dB, route:%s)",
-            *suffix ? " " : "", suffix, snr_str, route_str);
-
-    Serial.printf("   Received public ping -> echoing \"%s\"\n", replyText);
-
-    uint8_t temp[5 + MAX_TEXT_LEN + 32];
-    uint32_t now = getRTCClock()->getCurrentTime();
-    memcpy(temp, &now, 4);
-    temp[4] = 0;
-
-    snprintf((char*)&temp[5], MAX_TEXT_LEN, "%s: %s", _prefs.node_name, replyText);
-    temp[5 + MAX_TEXT_LEN] = 0;
-
-    int len = strlen((char*)&temp[5]);
-    auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, _public->channel, temp, 5 + len);
-    if (pkt2) {
-      sendFlood(pkt2);
-      Serial.println("   (public echo sent)");
-    } else {
-      Serial.println("   ERROR: unable to send public echo");
-    }
-  }
   }
 
   uint8_t onContactRequest(const ContactInfo& contact, uint32_t sender_timestamp, const uint8_t* data, uint8_t len, uint8_t* reply) override {
