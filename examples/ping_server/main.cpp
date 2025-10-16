@@ -430,7 +430,14 @@ public:
   }
 
   void sendSelfAdvert(int delay_millis) {
-    auto pkt = createSelfAdvert(_prefs.node_name, _prefs.node_lat, _prefs.node_lon);
+    uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+    uint8_t app_data_len;
+    {
+      AdvertDataBuilder builder(ADV_TYPE_NONE, _prefs.node_name, _prefs.node_lat, _prefs.node_lon);
+      app_data_len = builder.encodeTo(app_data);
+    }
+
+    auto pkt = createAdvert(self_id, app_data, app_data_len);
     if (pkt) {
       sendFlood(pkt, delay_millis);
     }
@@ -449,13 +456,8 @@ public:
     while (*command == ' ') command++;  // skip leading spaces
 
     if (strcmp(command, "advert") == 0) {
-      auto pkt = createSelfAdvert(_prefs.node_name, _prefs.node_lat, _prefs.node_lon);
-      if (pkt) {
-        sendZeroHop(pkt);
-        Serial.println("   (advert sent, zero hop).");
-      } else {
-        Serial.println("   ERR: unable to send");
-      }
+      sendSelfAdvert(0);
+      Serial.println("   (advert sent, flood).");
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
       if (memcmp(config, "name ", 5) == 0) {
