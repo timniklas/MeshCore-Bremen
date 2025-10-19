@@ -49,6 +49,17 @@
 
 #define  PUBLIC_GROUP_PSK  "PK4W/QZ7qcMqmL4i6bmFJQ=="
 
+// ------------------ Echo / Jitter Configuration ----------------------------------------
+// Alle Bots, die einen ping hören, sollen antworten, aber zeitlich versetzt.
+// Wir planen einen zufälligen Delay und schieben optional Backoff nach,
+// wenn wir vorher andere Echos hören.
+#define ECHO_MIN_DELAY_MS          2000    // Basis-Jitter (untere Grenze) 2 s
+#define ECHO_MAX_DELAY_MS          6000    // Basis-Jitter (obere Grenze) 6 s
+#define ECHO_BACKOFF_MIN_MS        300     // zusätzlicher Backoff, wenn wir andere Echos hören (min)
+#define ECHO_BACKOFF_MAX_MS        1500    // zusätzlicher Backoff (max)
+#define ECHO_MAX_TOTAL_DELAY_MS    30000   // Sicherheitskappe pro Ping: max 30 s Verzögerung
+/* -------------------------------------------------------------------------------------- */
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -72,6 +83,37 @@ static bool startsWithIgnoreCase(const char* text, const char* prefix) {
   }
   return *prefix == 0; // true, wenn prefix komplett übereinstimmt
 }
+
+/* ----------------------- Additional helpers for jitter / matching -------------------- */
+
+// uniform random zwischen lo..hi inkl. (nutzt Arduino random())
+static uint32_t randBetween(uint32_t lo, uint32_t hi) {
+  if (hi <= lo) return lo;
+  // Achtung: Arduino random(high) gibt [0..high-1] zurück.
+  uint32_t span = hi - lo + 1;
+  long r = random((long)span);      // garantiert 0..span-1
+  if (r < 0) r = -r;                // paranoia bei signed long
+  return lo + (uint32_t)r;
+}
+
+// case-insensitive substring (ASCII)
+static bool ciContains(const char* haystack, const char* needle) {
+  if (!haystack || !needle || !*needle) return false;
+  size_t nlen = strlen(needle);
+  for (const char* p = haystack; *p; ++p) {
+    size_t i = 0;
+    while (i < nlen && p[i]) {
+      char a = p[i], b = needle[i];
+      if (a >= 'A' && a <= 'Z') a += 32;
+      if (b >= 'A' && b <= 'Z') b += 32;
+      if (a != b) break;
+      ++i;
+    }
+    if (i == nlen) return true;
+  }
+  return false;
+}
+
 /* -------------------------------------------------------------------------------------- */
 
 struct NodePrefs {  // persisted to file
@@ -93,6 +135,15 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   char command[512+10];
   uint8_t tmp_buf[256];
   char hex_buf[512];
+
+  // Pending echo state (ein Pending reicht hier)
+  bool has_pending_echo;
+  uint32_t pending_send_at_ms;                 // millis() Deadline
+  uint32_t pending_created_ms;                 // millis() Planungszeit
+  char pending_ping_body[MAX_TEXT_LEN + 1];    // Ping-Body (ohne Senderpräfix)
+  float pending_snr;                           // SNR aus dem empfangenen Ping
+  uint8_t pending_path_len;                    // Pfadlänge aus dem empfangenen Ping
+  uint32_t pending_total_delay_ms;             // aufsummierter Delay inkl. Backoffs
 
   const char* getTypeName(uint8_t type) const {
     if (type == ADV_TYPE_CHAT) return "Chat";
@@ -216,8 +267,6 @@ protected:
   }
 
   void onDiscoveredContact(ContactInfo& contact, bool is_new, uint8_t path_len, const uint8_t* path) override {
-    // TODO: if not in favs,  prompt to add as fav(?)
-
     Serial.printf("ADVERT from -> %s\n", contact.name);
     Serial.printf("  type: %s\n", getTypeName(contact.type));
     Serial.print("   public key: "); mesh::Utils::printHex(Serial, contact.id.pub_key, PUB_KEY_SIZE); Serial.println();
@@ -233,14 +282,9 @@ protected:
   ContactInfo* processAck(const uint8_t *data) override {
     if (memcmp(data, &expected_ack_crc, 4) == 0) {     // got an ACK from recipient
       Serial.printf("   Got ACK! (round trip: %d millis)\n", _ms->getMillis() - last_msg_sent);
-      // NOTE: the same ACK can be received multiple times!
-      expected_ack_crc = 0;  // reset our expected hash, now that we have received ACK
-      return NULL;  // TODO: really should return ContactInfo pointer 
+      expected_ack_crc = 0;
+      return NULL;
     }
-
-    //uint32_t crc;
-    //memcpy(&crc, data, 4);
-    //MESH_DEBUG_PRINTLN("unknown ACK received: %08X (expected: %08X)", crc, expected_ack_crc);
     return NULL;
   }
 
@@ -279,7 +323,7 @@ protected:
       body = bodybuf;
     }
 
-    // Ping erkannt -> öffentliches Echo senden
+    // Ping erkannt -> öffentliches Echo planen
     if (startsWithIgnoreCase(body, "ping")) {
       char snr_str[12];
       dtostrf(pkt->getSNR(), 0, 1, snr_str);
@@ -291,30 +335,50 @@ protected:
         snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pkt->path_len);
       }
 
-      char replyText[MAX_TEXT_LEN];
-      snprintf(replyText, sizeof(replyText),
-              "ECHO: %s (SNR: %s dB, Route: %s)",
-              body, snr_str, route_str);
+      Serial.printf("   Received public ping -> scheduling echo for \"%s\"\n", body);
 
-      Serial.printf("   Received public ping -> echoing \"%s\"\n", replyText);
+      // Ping-Body & Metriken speichern
+      StrHelper::strncpy(pending_ping_body, body, sizeof(pending_ping_body));
+      pending_snr = pkt->getSNR();
+      pending_path_len = pkt->path_len;
 
-      uint8_t temp[5 + MAX_TEXT_LEN + 32];
-      uint32_t now = getRTCClock()->getCurrentTime();
-      memcpy(temp, &now, 4);
-      temp[4] = 0;
+      // Basis-Jitter (Millis)
+      uint32_t base_delay = randBetween(ECHO_MIN_DELAY_MS, ECHO_MAX_DELAY_MS);
+      uint32_t now_ms = _ms->getMillis();
+      pending_send_at_ms = now_ms + base_delay;
+      pending_created_ms = now_ms;
+      pending_total_delay_ms = base_delay;
+      has_pending_echo = true;
 
-      snprintf((char*)&temp[5], MAX_TEXT_LEN,
-              "%s: %s", _prefs.node_name, replyText);
-      temp[5 + MAX_TEXT_LEN] = 0;
+      Serial.printf("   (echo scheduled in ~%lu ms, SNR: %s dB, route: %s)\n",
+                    (unsigned long)base_delay, snr_str, route_str);
+      return;
+    }
 
-      int len = strlen((char*)&temp[5]);
-      auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
-                                      _public->channel, temp, 5 + len);
-      if (pkt2) {
-        sendFlood(pkt2);
-        Serial.println("   (public echo sent)");
-      } else {
-        Serial.println("   ERROR: unable to send public echo");
+    // Haben wir ein geplantes Echo, und hören ein anderes Echo zum selben Ping?
+    // -> zusätzlichen Backoff aufschlagen, damit nicht alle gleichzeitig funken.
+    if (has_pending_echo) {
+      if (startsWithIgnoreCase(body, "echo") || ciContains(body, "echo")) {
+        if (ciContains(body, pending_ping_body)) {
+          uint32_t extra = randBetween(ECHO_BACKOFF_MIN_MS, ECHO_BACKOFF_MAX_MS);
+          uint32_t new_total = pending_total_delay_ms + extra;
+          if (new_total > ECHO_MAX_TOTAL_DELAY_MS) new_total = ECHO_MAX_TOTAL_DELAY_MS;
+
+          uint32_t now_ms = _ms->getMillis();
+          uint32_t elapsed = now_ms - pending_created_ms;
+          if (new_total > elapsed) {
+            pending_send_at_ms = now_ms + (new_total - elapsed);
+          } else {
+            // schon länger gewartet als new_total -> minimal noch etwas schieben
+            pending_send_at_ms = now_ms + extra / 2;
+          }
+          pending_total_delay_ms = new_total;
+
+          Serial.printf("   (heard other echo -> +%lu ms backoff, send in ~%lu ms, total ~%lu ms)\n",
+                        (unsigned long)extra,
+                        (unsigned long)(pending_send_at_ms - now_ms),
+                        (unsigned long)pending_total_delay_ms);
+        }
       }
     }
   }
@@ -343,7 +407,6 @@ public:
   MyMesh(mesh::Radio& radio, StdRNG& rng, mesh::RTCClock& rtc, SimpleMeshTables& tables)
      : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables)
   {
-    // defaults
     memset(&_prefs, 0, sizeof(_prefs));
     _prefs.airtime_factor = 2.0;    // one third
     strcpy(_prefs.node_name, "PingBot");
@@ -352,6 +415,14 @@ public:
 
     command[0] = 0;
     curr_recipient = NULL;
+
+    has_pending_echo = false;
+    pending_send_at_ms = 0;
+    pending_created_ms = 0;
+    pending_ping_body[0] = 0;
+    pending_snr = 0.0f;
+    pending_path_len = 0;
+    pending_total_delay_ms = 0;
   }
 
   float getFreqPref() const { return _prefs.freq; }
@@ -371,7 +442,6 @@ public:
     IdentityStore store(fs, "/identity");
   #endif
     if (!store.load("_main", self_id, _prefs.node_name, sizeof(_prefs.node_name))) {  // legacy: node_name was from identity file
-      // Need way to get some entropy to seed RNG
       Serial.println("Press ENTER to generate key:");
       char c = 0;
       while (c != '\n') {   // wait for ENTER to be pressed
@@ -510,6 +580,56 @@ public:
       handleCommand(command);
       command[0] = 0;  // reset command buffer
     }
+
+    // --- Geplante Echo-Sendungen ausführen ---
+    if (has_pending_echo) {
+      uint32_t now_ms = _ms->getMillis();
+      if ((int32_t)(now_ms - pending_send_at_ms) >= 0) {
+        // Zeit zum Senden - Echo mit gespeicherter SNR/Route
+        char snr_str[12];
+        dtostrf(pending_snr, 0, 1, snr_str);
+
+        char route_str[24];
+        if (pending_path_len == 0) {
+          strcpy(route_str, "direct");
+        } else {
+          snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pending_path_len);
+        }
+
+        char replyText[MAX_TEXT_LEN];
+        snprintf(replyText, sizeof(replyText),
+                "ECHO: %s (SNR: %s dB, Route: %s)",
+                pending_ping_body, snr_str, route_str);
+
+        Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
+
+        uint8_t temp[5 + MAX_TEXT_LEN + 32];
+        uint32_t now = getRTCClock()->getCurrentTime();
+        memcpy(temp, &now, 4);
+        temp[4] = 0;
+
+        snprintf((char*)&temp[5], MAX_TEXT_LEN,
+                "%s: %s", _prefs.node_name, replyText);
+        temp[5 + MAX_TEXT_LEN] = 0;
+
+        int outlen = strlen((char*)&temp[5]);
+        auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
+                                        _public->channel, temp, 5 + outlen);
+        if (pkt2) {
+          sendFlood(pkt2);
+          Serial.println("   (public echo sent - delayed)");
+        } else {
+          Serial.println("   ERROR: unable to send public echo (delayed)");
+        }
+
+        // Reset pending state
+        has_pending_echo = false;
+        pending_ping_body[0] = 0;
+        pending_snr = 0.0f;
+        pending_path_len = 0;
+        pending_total_delay_ms = 0;
+      }
+    }
   }
 };
 
@@ -538,6 +658,9 @@ void setup() {
   if (!radio_init()) { halt(); }
 
   fast_rng.begin(radio_get_rng_seed());
+
+  // Seed für Arduino random(): mische Funk-Zufall mit Zeit
+  randomSeed((uint32_t)(micros() ^ radio_get_rng_seed()));
 
 #if defined(NRF52_PLATFORM)
   InternalFS.begin();
