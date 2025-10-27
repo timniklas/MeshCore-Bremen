@@ -50,15 +50,16 @@
 #define  PUBLIC_GROUP_PSK  "PK4W/QZ7qcMqmL4i6bmFJQ=="
 
 // ------------------ Echo / Jitter Configuration ----------------------------------------
-// Alle Bots, die einen ping hören, sollen antworten, aber zeitlich versetzt.
-// Wir planen einen zufälligen Delay und schieben optional Backoff nach,
-// wenn wir vorher andere Echos hören.
-#define ECHO_MIN_DELAY_MS          2000    // Basis-Jitter (untere Grenze) 2 s
-#define ECHO_MAX_DELAY_MS          6000    // Basis-Jitter (obere Grenze) 6 s
-#define ECHO_BACKOFF_MIN_MS        300     // zusätzlicher Backoff, wenn wir andere Echos hören (min)
-#define ECHO_BACKOFF_MAX_MS        1500    // zusätzlicher Backoff (max)
-#define ECHO_MAX_TOTAL_DELAY_MS    30000   // Sicherheitskappe pro Ping: max 30 s Verzögerung
+#define ECHO_MIN_DELAY_MS          2000
+#define ECHO_MAX_DELAY_MS          6000
+#define ECHO_BACKOFF_MIN_MS        300
+#define ECHO_BACKOFF_MAX_MS        1500
+#define ECHO_MAX_TOTAL_DELAY_MS    30000
+#define ECHO_MIN_INTERVAL_MS       15000
 /* -------------------------------------------------------------------------------------- */
+
+// Persistenz-Datei für die Uhrzeit
+#define RTC_FILE_PATH "/rtc_time"
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -89,10 +90,9 @@ static bool startsWithIgnoreCase(const char* text, const char* prefix) {
 // uniform random zwischen lo..hi inkl. (nutzt Arduino random())
 static uint32_t randBetween(uint32_t lo, uint32_t hi) {
   if (hi <= lo) return lo;
-  // Achtung: Arduino random(high) gibt [0..high-1] zurück.
   uint32_t span = hi - lo + 1;
-  long r = random((long)span);      // garantiert 0..span-1
-  if (r < 0) r = -r;                // paranoia bei signed long
+  long r = random((long)span);
+  if (r < 0) r = -r;
   return lo + (uint32_t)r;
 }
 
@@ -144,6 +144,45 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   float pending_snr;                           // SNR aus dem empfangenen Ping
   uint8_t pending_path_len;                    // Pfadlänge aus dem empfangenen Ping
   uint32_t pending_total_delay_ms;             // aufsummierter Delay inkl. Backoffs
+
+  // Sicherheitsnetz gegen zu häufige Echos
+  uint32_t last_echo_sent_ms;
+
+  // ---- NEU: Zeit-Persistenz (nur beim Setzen) ----
+  void saveRTCToFS(uint32_t epoch) {
+#if defined(NRF52_PLATFORM)
+    _fs->remove(RTC_FILE_PATH);
+    File f = _fs->open(RTC_FILE_PATH, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+    File f = _fs->open(RTC_FILE_PATH, "w");
+#else
+    File f = _fs->open(RTC_FILE_PATH, "w", true);
+#endif
+    if (!f) {
+      Serial.println("   (WARN: cannot open RTC file for write)");
+      return;
+    }
+    const uint32_t magic = 0x52544331; // "RTC1"
+    f.write((const uint8_t*)&magic, sizeof(magic));
+    f.write((const uint8_t*)&epoch, sizeof(epoch));
+    f.close();
+  }
+
+  uint32_t loadRTCFromFS() {
+    if (!_fs->exists(RTC_FILE_PATH)) return 0;
+#if defined(RP2040_PLATFORM)
+    File f = _fs->open(RTC_FILE_PATH, "r");
+#else
+    File f = _fs->open(RTC_FILE_PATH);
+#endif
+    if (!f) return 0;
+    uint32_t magic = 0, epoch = 0;
+    bool ok = (f.read((uint8_t*)&magic, sizeof(magic)) == sizeof(magic)) &&
+              (f.read((uint8_t*)&epoch, sizeof(epoch)) == sizeof(epoch));
+    f.close();
+    if (!ok || magic != 0x52544331) return 0;
+    return epoch;
+  }
 
   const char* getTypeName(uint8_t type) const {
     if (type == ADV_TYPE_CHAT) return "Chat";
@@ -225,32 +264,12 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (timestamp > curr) {
       getRTCClock()->setCurrentTime(timestamp);
-      Serial.println("   (OK - clock set!)");
+      // ---- NEU: Nur beim Setzen der Zeit dauerhaft speichern ----
+      saveRTCToFS(timestamp);
+      Serial.println("   (OK - clock set & saved!)");
     } else {
       Serial.println("   (ERR: clock cannot go backwards)");
     }
-  }
-
-  void importCard(const char* command) {
-    while (*command == ' ') command++;   // skip leading spaces
-    if (memcmp(command, "meshcore://", 11) == 0) {
-      command += 11;  // skip the prefix
-      char *ep = strchr(command, 0);  // find end of string
-      while (ep > command) {
-        ep--;
-        if (mesh::Utils::isHexChar(*ep)) break;  // found tail end of card
-        *ep = 0;  // remove trailing spaces and other junk
-      }
-      int len = strlen(command);
-      if (len % 2 == 0) {
-        len >>= 1;  // halve, for num bytes
-        if (mesh::Utils::fromHex(tmp_buf, len, command)) {
-          importContact(tmp_buf, len);
-          return;
-        }
-      }
-    }
-    Serial.println("   error: invalid format");
   }
 
 protected:
@@ -291,6 +310,10 @@ protected:
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) override {
     Serial.printf("(%s) MSG -> from %s\n", pkt->isRouteDirect() ? "DIRECT" : "FLOOD", from.name);
     Serial.printf("   %s\n", text);
+
+    if (strcmp(text, "clock sync") == 0) {  // special text command
+      setClock(sender_timestamp + 1);
+    }
   }
 
   void onCommandDataRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) override {
@@ -323,8 +346,38 @@ protected:
       body = bodybuf;
     }
 
-    // Ping erkannt -> öffentliches Echo planen
-    if (startsWithIgnoreCase(body, "ping")) {
+    /* --------------------- ADDED GUARDS: Self/Loopback & strict ping match --------------------- */
+
+    // 1) Eigene Nachrichten ignorieren (falls Namepräfix vorhanden)
+    if (senderName[0] && strcmp(senderName, _prefs.node_name) == 0) {
+      return;
+    }
+
+    // 2) Heuristik: sehr wahrscheinliches lokales Loopback
+    if (pkt->isRouteDirect() && pkt->getSNR() == 0.0f && pkt->path_len == 0) {
+      return;
+    }
+
+    auto isPingTrigger = [](const char* b) -> bool {
+      if (!b) return false;
+      if (!startsWithIgnoreCase(b, "ping")) return false;
+      char c = b[4];
+      return (c == 0 || c == ' ');
+    };
+
+    bool hasPrefix = (sep != nullptr && senderName[0] != 0);
+
+    // Ping erkannt -> öffentliches Echo planen (nur wenn strenger Trigger erfüllt und Präfix vorhanden)
+    if (hasPrefix && isPingTrigger(body)) {
+
+#if ECHO_MIN_INTERVAL_MS > 0
+      if (_ms->getMillis() - last_echo_sent_ms < ECHO_MIN_INTERVAL_MS) {
+        Serial.printf("   (rate-limited: skipping echo; next in ~%lu ms)\n",
+                      (unsigned long)(ECHO_MIN_INTERVAL_MS - (_ms->getMillis() - last_echo_sent_ms)));
+        return;
+      }
+#endif
+
       char snr_str[12];
       dtostrf(pkt->getSNR(), 0, 1, snr_str);
 
@@ -337,12 +390,10 @@ protected:
 
       Serial.printf("   Received public ping -> scheduling echo for \"%s\"\n", body);
 
-      // Ping-Body & Metriken speichern
       StrHelper::strncpy(pending_ping_body, body, sizeof(pending_ping_body));
       pending_snr = pkt->getSNR();
       pending_path_len = pkt->path_len;
 
-      // Basis-Jitter (Millis)
       uint32_t base_delay = randBetween(ECHO_MIN_DELAY_MS, ECHO_MAX_DELAY_MS);
       uint32_t now_ms = _ms->getMillis();
       pending_send_at_ms = now_ms + base_delay;
@@ -355,8 +406,6 @@ protected:
       return;
     }
 
-    // Haben wir ein geplantes Echo, und hören ein anderes Echo zum selben Ping?
-    // -> zusätzlichen Backoff aufschlagen, damit nicht alle gleichzeitig funken.
     if (has_pending_echo) {
       if (startsWithIgnoreCase(body, "echo") || ciContains(body, "echo")) {
         if (ciContains(body, pending_ping_body)) {
@@ -369,7 +418,6 @@ protected:
           if (new_total > elapsed) {
             pending_send_at_ms = now_ms + (new_total - elapsed);
           } else {
-            // schon länger gewartet als new_total -> minimal noch etwas schieben
             pending_send_at_ms = now_ms + extra / 2;
           }
           pending_total_delay_ms = new_total;
@@ -423,6 +471,8 @@ public:
     pending_snr = 0.0f;
     pending_path_len = 0;
     pending_total_delay_ms = 0;
+
+    last_echo_sent_ms = 0;
   }
 
   float getFreqPref() const { return _prefs.freq; }
@@ -455,6 +505,16 @@ public:
         self_id = mesh::LocalIdentity(getRNG()); count++;
       }
       store.save("_main", self_id);
+    }
+
+    // Persistierte Zeit laden (falls vorhanden)
+    uint32_t persisted = loadRTCFromFS();
+    if (persisted > 0) {
+      uint32_t curr = getRTCClock()->getCurrentTime();
+      if (persisted > curr) {
+        getRTCClock()->setCurrentTime(persisted);
+        Serial.printf("   (RTC restored from FS: %lu)\n", (unsigned long)persisted);
+      }
     }
 
     // load persisted prefs
@@ -528,6 +588,13 @@ public:
     if (strcmp(command, "advert") == 0) {
       sendSelfAdvert(0);
       Serial.println("   (advert sent, flood).");
+    } else if (strcmp(command, "clock") == 0) {    // show current time
+      uint32_t now = getRTCClock()->getCurrentTime();
+      DateTime dt = DateTime(now);
+      Serial.printf(   "%02d:%02d - %d/%d/%d UTC\n", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+    } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
+      uint32_t secs = _atoi(&command[5]);
+      setClock(secs);
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
       if (memcmp(config, "name ", 5) == 0) {
@@ -585,7 +652,6 @@ public:
     if (has_pending_echo) {
       uint32_t now_ms = _ms->getMillis();
       if ((int32_t)(now_ms - pending_send_at_ms) >= 0) {
-        // Zeit zum Senden - Echo mit gespeicherter SNR/Route
         char snr_str[12];
         dtostrf(pending_snr, 0, 1, snr_str);
 
@@ -618,6 +684,9 @@ public:
         if (pkt2) {
           sendFlood(pkt2);
           Serial.println("   (public echo sent - delayed)");
+#if ECHO_MIN_INTERVAL_MS > 0
+          last_echo_sent_ms = _ms->getMillis();
+#endif
         } else {
           Serial.println("   ERROR: unable to send public echo (delayed)");
         }
@@ -630,6 +699,21 @@ public:
         pending_total_delay_ms = 0;
       }
     }
+
+    //update display
+    display.startFrame();
+    display.setCursor(0, 0);
+    display.print("< Ping Server >");
+    display.setCursor(0, 10);
+    display.print(_prefs.node_name);
+    display.setCursor(0, 50);
+    uint32_t now = getRTCClock()->getCurrentTime();
+    DateTime dt = DateTime(now);
+    char buffer[32];
+    sprintf(buffer, "%02d.%02d.%d %02d:%02d UTC", 
+            dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+    display.print(buffer);
+    display.endFrame();
   }
 };
 
@@ -650,7 +734,7 @@ void setup() {
   if (display.begin()) {
     display.startFrame();
     display.setCursor(0, 0);
-    display.print("< Ping Server >");
+    display.print("Please wait...");
     display.endFrame();
   }
 #endif
