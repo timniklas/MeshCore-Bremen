@@ -1,0 +1,42 @@
+name: Build Ping Server Firmware
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [published]  # läuft, wenn eine Release veröffentlicht wird
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Version aus der Release (Tag) ziehen
+      GIT_TAG_VERSION: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Clone Repo (Tag aus der Release)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build Firmwares
+        env:
+          FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
+        run: /usr/bin/env bash build.sh build-ping-server-firmwares
+
+      - name: Upload Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-firmwares
+          path: out
+
+      # Existierende Release (dieses Events) mit den Builds befüllen
+      - name: Attach assets to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: out/*
