@@ -4,21 +4,24 @@ permissions:
   contents: write
 
 on:
-  release:
-    types: [published]  # läuft, wenn eine Release veröffentlicht wird
+  push:
+    # Pattern matched against refs/tags
+    tags:        
+      - '*'           # Push events to every tag not containing /
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Version aus der Release (Tag) ziehen
-      GIT_TAG_VERSION: ${{ github.event.release.tag_name }}
+      # Tag-Name des Push-Events (z.B. "ping-server-1.2.3")
+      GIT_TAG_VERSION: ${{ github.ref_name }}
 
     steps:
-      - name: Clone Repo (Tag aus der Release)
+      - name: Checkout at tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          # Der auslösende Ref inkl. "refs/tags/..."
+          ref: ${{ github.ref }}
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
@@ -31,12 +34,12 @@ jobs:
       - name: Upload Workflow Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: companion-firmwares
+          name: ping-server-firmwares
           path: out
 
-      # Existierende Release (dieses Events) mit den Builds befüllen
-      - name: Attach assets to Release
+      - name: Create or update GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ github.ref_name }}
+          name: Ping Server Firmware ${{ github.ref_name }}
           files: out/*
