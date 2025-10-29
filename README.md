@@ -1,124 +1,93 @@
-## About MeshCore
+# 🇩🇪 MeshCore – Bremen Custom Firmware
 
-MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
+Dies ist ein **regionaler Fork** von [MeshCore](https://github.com/meshcore-dev/MeshCore),  
+der zusätzliche, optionale Firmware-Rollen für das **Bremer Mesh-Netzwerk** bereitstellt.  
 
-## 🔍 What is MeshCore?
+Die Basisfunktionen und das Protokoll von MeshCore bleiben **unverändert** –  
+dieser Fork ergänzt lediglich eigene Spezial-Firmwares (Custom Roles),  
+die mit dem offiziellen MeshCore-Ökosystem vollständig kompatibel sind.
 
-MeshCore now supports a range of LoRa devices, allowing for easy flashing without the need to compile firmware manually. Users can flash a pre-built binary using tools like Adafruit ESPTool and interact with the network through a serial console.
-MeshCore provides the ability to create wireless mesh networks, similar to Meshtastic and Reticulum but with a focus on lightweight multi-hop packet routing for embedded projects. Unlike Meshtastic, which is tailored for casual LoRa communication, or Reticulum, which offers advanced networking, MeshCore balances simplicity with scalability, making it ideal for custom embedded solutions., where devices (nodes) can communicate over long distances by relaying messages through intermediate nodes. This is especially useful in off-grid, emergency, or tactical situations where traditional communication infrastructure is unavailable.
+---
 
-## ⚡ Key Features
+## 🌐 Einstieg & Dokumentation
 
-* Multi-Hop Packet Routing
-  * Devices can forward messages across multiple nodes, extending range beyond a single radio's reach.
-  * Supports up to a configurable number of hops to balance network efficiency and prevent excessive traffic.
-  * Nodes use fixed roles where "Companion" nodes are not repeating messages at all to prevent adverse routing paths from being used.
-* Supports LoRa Radios – Works with Heltec, RAK Wireless, and other LoRa-based hardware.
-* Decentralized & Resilient – No central server or internet required; the network is self-healing.
-* Low Power Consumption – Ideal for battery-powered or solar-powered devices.
-* Simple to Deploy – Pre-built example applications make it easy to get started.
+➡️ **Lokale Anleitung & Willkommensseite:**  
+[https://meshcore.bremesh.de/moin](https://meshcore.bremesh.de/moin)
 
-## 🎯 What Can You Use MeshCore For?
+➡️ **Offizielle MeshCore-Doku:**  
+[https://github.com/meshcore-dev/MeshCore](https://github.com/meshcore-dev/MeshCore)
 
-* Off-Grid Communication: Stay connected even in remote areas.
-* Emergency Response & Disaster Recovery: Set up instant networks where infrastructure is down.
-* Outdoor Activities: Hiking, camping, and adventure racing communication.
-* Tactical & Security Applications: Military, law enforcement, and private security use cases.
-* IoT & Sensor Networks: Collect data from remote sensors and relay it back to a central location.
+---
 
-## 🚀 How to Get Started
+## ⚙️ Custom Firmware-Rollen
 
-- Watch the [MeshCore Intro Video](https://www.youtube.com/watch?v=t1qne8uJBAc) by Andy Kirby.
-- Read through our [Frequently Asked Questions](./docs/faq.md) section.
-- Flash the MeshCore firmware on a supported device.
-- Connect with a supported client.
+Dieser Fork ergänzt den offiziellen MeshCore-Flasher um neue Rollen,  
+die du über den **„Custom Firmware“-Button** (ganz unten im Web-Flasher) installieren kannst:
 
-For developers;
+👉 **[https://flasher.meshtastic.org](https://flasher.meshtastic.org)**
 
-- Install [PlatformIO](https://docs.platformio.org) in [Visual Studio Code](https://code.visualstudio.com).
-- Clone and open the MeshCore repository in Visual Studio Code.
-- See the example applications you can modify and run:
-  - [Companion Radio](./examples/companion_radio) - For use with an external chat app, over BLE, USB or WiFi.
-  - [Simple Repeater](./examples/simple_repeater) - Extends network coverage by relaying messages.
-  - [Simple Room Server](./examples/simple_room_server) - A simple BBS server for shared Posts.
-  - [Simple Secure Chat](./examples/simple_secure_chat) - Secure terminal based text communication between devices.
+Wähle dein Board, klicke auf **„Custom Firmware“**,  
+und lade die gewünschte `.bin`-Datei hoch (z. B. `ping_server.bin`).
 
-The Simple Secure Chat example can be interacted with through the Serial Monitor in Visual Studio Code, or with a Serial USB Terminal on Android.
+---
 
-## ⚡️ MeshCore Flasher
+### 🆕 Verfügbare Custom-Rollen
 
-We have prebuilt firmware ready to flash on supported devices.
+#### 🛰️ Ping Server
+**Zweck:** Antwortet automatisch auf `ping`-Nachrichten im Kanal `#ping`.
 
-- Launch https://flasher.meshcore.co.uk
-- Select a supported device
-- Flash one of the firmware types:
-  - Companion, Repeater or Room Server
-- Once flashing is complete, you can connect with one of the MeshCore clients below.
+**Nutzen:**
+- Testet Reichweite & Paketweiterleitung im Bremer Mesh  
+- Misst Antwortzeiten (RTT) zwischen Knoten  
+- Ideal für feste Standorte (z. B. Solar- oder Dachnodes)
 
-## 📱 MeshCore Clients
+**Verhalten:**
+- Keine Benutzeroberfläche  
+- Kein Chat, keine Weiterleitung anderer Nachrichten  
+- Minimaler Energieverbrauch  
 
-**Companion Firmware**
+**Typische Verwendung:**
+```text
+Companion → sendet ping → Ping Server antwortet → Reichweite sichtbar
+```
 
-The companion firmware can be connected to via BLE, USB or WiFi depending on the firmware type you flashed.
+---
 
-- Web: https://app.meshcore.nz
-- Android: https://play.google.com/store/apps/details?id=com.liamcottle.meshcore.android
-- iOS: https://apps.apple.com/us/app/meshcore/id6742354151?platform=iphone
-- NodeJS: https://github.com/liamcottle/meshcore.js
-- Python: https://github.com/fdlamotte/meshcore-cli
 
-**Repeater and Room Server Firmware**
+## 🚀 Flash-Anleitung
 
-The repeater and room server firmwares can be setup via USB in the web config tool.
+1. Öffne [https://flasher.meshtastic.org](https://flasher.meshtastic.org)  
+2. Wähle dein Gerät (z. B. Heltec, LilyGo T-Beam, RAK Wireless RAK4631)  
+3. Scrolle nach unten und klicke auf **„Custom Firmware“**  
+4. Lade die gewünschte `.bin`-Datei hoch (z. B. `ping_server.bin`)  
+5. Nach dem Flashen:
+   - Region: `EU/UK (NARROW)`  
+   - Kanal: `Public` (+ optional `#ping`)  
+   - Rolle wählen: `Companion`, `Repeater`, `Ping Server`, …  
 
-- https://config.meshcore.dev
+---
 
-They can also be managed via LoRa in the mobile app by using the Remote Management feature.
+## 🛠 Hardware-Kompatibilität
 
-## 🛠 Hardware Compatibility
+Bisher unterstützte Geräte:
+- Heltec WiFi LoRa 32 V3
+- LilyGo T-Beam 1.2
 
-MeshCore is designed for devices listed in the [MeshCore Flasher](https://flasher.meshcore.co.uk)
+---
 
-## 📜 License
+## 📜 Lizenz
 
-MeshCore is open-source software released under the MIT License. You are free to use, modify, and distribute it for personal and commercial projects.
+Dieses Projekt basiert auf  
+[MeshCore (© Liam Cottle, MIT License)](https://github.com/meshcore-dev/MeshCore)  
 
-## Contributing
+Zusatzkomponenten (z. B. `Ping Server`) sind ebenfalls unter der **MIT-Lizenz** veröffentlicht.  
+Alle übrigen Teile bleiben quell- und protokollkompatibel zum Original.
 
-Please submit PR's using 'dev' as the base branch!
-For minor changes just submit your PR and I'll try to review it, but for anything more 'impactful' please open an Issue first and start a discussion. Is better to sound out what it is you want to achieve first, and try to come to a consensus on what the best approach is, especially when it impacts the structure or architecture of this codebase.
+---
 
-Here are some general principals you should try to adhere to:
-* Keep it simple. Please, don't think like a high-level lang programmer. Think embedded, and keep code concise, without any unecessary layers.
-* No dynamic memory allocation, except during setup/begin functions.
-* Use the same brace and indenting style that's in the core source modules. (A .clang-format is prob going to be added soon, but please do NOT retroactively re-format existing code. This just creates unnecessary diffs that make finding problems harder)
+## 💬 Community & Support
 
-## Road-Map / To-Do
-
-There are a number of fairly major features in the pipeline, with no particular time-frames attached yet. In very rough chronological order:
-- [X] Companion radio: UI redesign
-- [X] Repeater + Room Server: add ACL's (like Sensor Node has)
-- [X] Standardise Bridge mode for repeaters
-- [ ] Repeater/Bridge: Standardise the Transport Codes for zoning/filtering
-- [X] Core + Repeater: enhanced zero-hop neighbour discovery
-- [ ] Core: round-trip manual path support
-- [ ] Companion + Apps: support for multiple sub-meshes (and 'off-grid' client repeat mode)
-- [ ] Core + Apps: support for LZW message compression
-- [ ] Core: dynamic CR (Coding Rate) for weak vs strong hops
-- [ ] Core: new framework for hosting multiple virtual nodes on one physical device
-- [ ] V2 protocol spec: discussion and concensus around V2 packet protocol, including path hashes, new encryption specs, etc
-
-## 📞 Get Support
-
-- Report bugs and request features on the [GitHub Issues](https://github.com/ripplebiz/MeshCore/issues) page.
-- Find additional guides and components on [my site](https://buymeacoffee.com/ripplebiz).
-- Join [MeshCore Discord](https://discord.gg/BMwCtwHj5V) to chat with the developers and get help from the community.
-
-## RAK Wireless Board Support in PlatformIO
-
-Before building/flashing the RAK4631 targets in this project, there is, unfortunately, some patching you have to do to your platformIO packages to make it work. There is a guide here on the process:
-   [RAK Wireless: How to Perform Installation of Board Support Package in PlatformIO](https://learn.rakwireless.com/hc/en-us/articles/26687276346775-How-To-Perform-Installation-of-Board-Support-Package-in-PlatformIO)
-
-After building, you will need to convert the output firmware.hex file into a .uf2 file you can copy over to your RAK4631 device (after doing a full erase) by using the command `uf2conv.py -f 0xADA52840 -c firmware.hex` with the python script available from:
-   [GitHub: Microsoft - uf2](https://github.com/Microsoft/uf2/blob/master/utils/uf2conv.py)
-
+- 📖 Willkommensseite: [meshcore.bremesh.de/moin](https://meshcore.bremesh.de/moin)  
+- 🗺️ Karten:  
+  - MeshCore-Karte → [meshcore.bremesh.de](https://meshcore.bremesh.de)  
+  - Meshtastic-Karte → [meshtastic.bremesh.de](https://meshtastic.bremesh.de)
