@@ -150,10 +150,22 @@ build_room_server_firmwares() {
 
 }
 
+build_ping_server_firmwares() {
+
+#  # build specific room server firmwares
+#  build_firmware "Heltec_v3_room_server"
+#  build_firmware "RAK_4631_room_server"
+
+  # build all room server firmwares
+  build_all_firmwares_by_suffix "_ping_server"
+
+}
+
 build_firmwares() {
   build_companion_firmwares
   build_repeater_firmwares
   build_room_server_firmwares
+  build_ping_server_firmwares
 }
 
 # clean build dir
@@ -186,4 +198,6 @@ elif [[ $1 == "build-repeater-firmwares" ]]; then
   build_repeater_firmwares
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
+elif [[ $1 == "build-ping-server-firmwares" ]]; then
+  build_ping_server_firmwares
 fi
