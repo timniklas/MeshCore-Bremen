@@ -3,6 +3,14 @@
 #include "../MyMesh.h"
 #include "target.h"
 
+#ifdef PIN_BUZZER
+  #include <helpers/ui/buzzer.cpp>
+#endif
+
+#ifdef PIN_VIBRATION
+  #include <helpers/ui/GenericVibration.cpp>
+#endif
+
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
 #endif
