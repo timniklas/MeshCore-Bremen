@@ -1,4 +1,4 @@
-name: Build Ping Server Firmware
+name: Build T114 Buzzer Firmware
 
 permissions:
   contents: write
