@@ -26,7 +26,7 @@ jobs:
       - name: Build Firmwares
         env:
           FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
-        run: /usr/bin/env bash build.sh build-firmware Heltec_t114_companion_radio_ble
+        run: /usr/bin/env bash build.sh build-firmware Heltec_t114_companion_vibration_gpio44
 
       - name: Upload Workflow Artifacts
         uses: actions/upload-artifact@v4
