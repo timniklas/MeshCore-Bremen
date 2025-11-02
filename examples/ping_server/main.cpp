@@ -700,6 +700,7 @@ public:
       }
     }
 
+#ifdef DISPLAY_CLASS
     //update display
     display.startFrame();
     display.setCursor(0, 0);
@@ -714,6 +715,7 @@ public:
             dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
     display.print(buffer);
     display.endFrame();
+#endif
   }
 };
 
