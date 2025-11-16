@@ -164,6 +164,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   float pending_snr;                           // SNR aus dem empfangenen Ping
   uint8_t pending_path_len;                    // Pfadlänge aus dem empfangenen Ping
   uint32_t pending_total_delay_ms;             // aufsummierter Delay inkl. Backoffs
+  bool pending_has_direct_snr;                 // true, wenn Route direkt ist
 
   // Sicherheitsnetz gegen zu häufige Echos
   uint32_t last_echo_sent_ms;
@@ -400,7 +401,8 @@ protected:
       dtostrf(pkt->getSNR(), 0, 1, snr_str);
 
       char route_str[24];
-      if (pkt->isRouteDirect() || pkt->path_len == 0) {
+      bool route_is_direct = (pkt->isRouteDirect() || pkt->path_len == 0);
+      if (route_is_direct) {
         strcpy(route_str, "direct");
       } else {
         snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pkt->path_len);
@@ -412,6 +414,7 @@ protected:
       StrHelper::strncpy(pending_sender_name, senderName, sizeof(pending_sender_name)); // Absender merken
       pending_snr = pkt->getSNR();
       pending_path_len = pkt->path_len;
+      pending_has_direct_snr = route_is_direct;
 
       uint32_t base_delay = randBetween(ECHO_MIN_DELAY_MS, ECHO_MAX_DELAY_MS);
       uint32_t now_ms = _ms->getMillis();
@@ -420,8 +423,13 @@ protected:
       pending_total_delay_ms = base_delay;
       has_pending_echo = true;
 
-      Serial.printf("   (echo scheduled in ~%lu ms, SNR: %s dB, route: %s)\n",
-                    (unsigned long)base_delay, snr_str, route_str);
+      if (pending_has_direct_snr) {
+        Serial.printf("   (echo scheduled in ~%lu ms, SNR: %s dB, route: %s)\n",
+                      (unsigned long)base_delay, snr_str, route_str);
+      } else {
+        Serial.printf("   (echo scheduled in ~%lu ms, route: %s)\n",
+                      (unsigned long)base_delay, route_str);
+      }
       return;
     }
 
@@ -491,6 +499,7 @@ public:
     pending_snr = 0.0f;
     pending_path_len = 0;
     pending_total_delay_ms = 0;
+    pending_has_direct_snr = false;
 
     last_echo_sent_ms = 0;
   }
@@ -686,10 +695,19 @@ public:
 
         const char* mention = (pending_sender_name[0] != 0) ? pending_sender_name : "unknown";
 
-        // Erwähnung mit @[Absender]
-        snprintf(replyText, sizeof(replyText),
-                "ECHO: @[%s] %s (SNR: %s dB, Route: %s)",
-                mention, pending_ping_body, snr_str, route_str);
+        // Erwähnung mit @[Absender] – SNR nur bei direkter Route ausgeben
+        if (pending_has_direct_snr) {
+          snprintf(replyText, sizeof(replyText),
+                   "@[%s] ECHO: %s (SNR: %s dB, Route: %s)",
+                   mention, pending_ping_body, snr_str, route_str);
+        } else {
+          snprintf(replyText, sizeof(replyText),
+                   "@[%s] ECHO: %s (Route: %s)",
+                   mention, pending_ping_body, route_str);
+        }
+
+        // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
+        censorPingInplace((char*)&replyText);
 
         Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
 
@@ -702,9 +720,6 @@ public:
         snprintf((char*)&temp[5], MAX_TEXT_LEN,
                 "%s: %s", _prefs.node_name, replyText);
         ((char*)&temp[5])[MAX_TEXT_LEN] = 0;
-
-        // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
-        censorPingInplace((char*)&temp[5]);
 
         int outlen = strlen((char*)&temp[5]);
         auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
@@ -726,6 +741,7 @@ public:
         pending_snr = 0.0f;
         pending_path_len = 0;
         pending_total_delay_ms = 0;
+        pending_has_direct_snr = false;
       }
     }
 
