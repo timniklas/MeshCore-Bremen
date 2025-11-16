@@ -18,7 +18,7 @@
 
 /* ---------------------------------- CONFIGURATION ------------------------------------- */
 
-#define FIRMWARE_VER_TEXT   "v2 (build: 4 Feb 2025)"
+#define FIRMWARE_VER_TEXT   "v2 (build: 16 Nov 2025)"
 
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
@@ -624,6 +624,8 @@ public:
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
       setClock(secs);
+    } else if (memcmp(command, "ver", 3) == 0) {
+      Serial.println(FIRMWARE_VER_TEXT);
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
       if (memcmp(config, "name ", 5) == 0) {
