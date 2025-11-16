@@ -704,7 +704,7 @@ public:
           snprintf(replyText, sizeof(replyText),
                    "@[%s] ECHO: %s (Route: %s)",
                    mention, pending_ping_body, route_str);
-        }c
+        }
 
         Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
 
