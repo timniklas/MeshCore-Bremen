@@ -512,11 +512,6 @@ public:
     IdentityStore store(fs, "/identity");
   #endif
     if (!store.load("_main", self_id, _prefs.node_name, sizeof(_prefs.node_name))) {  // legacy: node_name was from identity file
-      Serial.println("Press ENTER to generate key:");
-      char c = 0;
-      while (c != '\n') {   // wait for ENTER to be pressed
-        if (Serial.available()) c = Serial.read();
-      }
       ((StdRNG *)getRNG())->begin(millis());
 
       self_id = mesh::LocalIdentity(getRNG());  // create new random identity
