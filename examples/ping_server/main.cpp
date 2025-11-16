@@ -704,10 +704,7 @@ public:
           snprintf(replyText, sizeof(replyText),
                    "@[%s] ECHO: %s (Route: %s)",
                    mention, pending_ping_body, route_str);
-        }
-
-        // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
-        censorPingInplace((char*)&replyText);
+        }c
 
         Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
 
@@ -720,6 +717,9 @@ public:
         snprintf((char*)&temp[5], MAX_TEXT_LEN,
                 "%s: %s", _prefs.node_name, replyText);
         ((char*)&temp[5])[MAX_TEXT_LEN] = 0;
+
+        // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
+        censorPingInplace((char*)&temp[5]);
 
         int outlen = strlen((char*)&temp[5]);
         auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
