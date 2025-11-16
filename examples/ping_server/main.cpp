@@ -484,7 +484,7 @@ public:
   {
     memset(&_prefs, 0, sizeof(_prefs));
     _prefs.airtime_factor = 2.0;    // one third
-    strcpy(_prefs.node_name, "PingBot");
+    strcpy(_prefs.node_name, "PingBot HB");
     _prefs.freq = LORA_FREQ;
     _prefs.tx_power_dbm = LORA_TX_POWER;
 
