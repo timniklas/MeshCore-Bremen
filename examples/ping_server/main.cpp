@@ -114,6 +114,25 @@ static bool ciContains(const char* haystack, const char* needle) {
   return false;
 }
 
+/* ------------------------- Zensur-Helfer für "ping" -> "p*ng" ------------------------ */
+
+// ersetzt jedes (case-insensitive) "ping" im String durch "p*ng" / "P*ng" etc.
+static void censorPingInplace(char* s) {
+  if (!s) return;
+  for (char* p = s; p[0] && p[1] && p[2] && p[3]; ++p) {
+    char c0 = p[0], c1 = p[1], c2 = p[2], c3 = p[3];
+    if ((c0 == 'p' || c0 == 'P') &&
+        (c1 == 'i' || c1 == 'I') &&
+        (c2 == 'n' || c2 == 'N') &&
+        (c3 == 'g' || c3 == 'G')) {
+      // wir behalten das P/p bei und machen p*ng / P*ng
+      p[1] = '*';
+      p[2] = 'n';
+      p[3] = 'g';
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------------------- */
 
 struct NodePrefs {  // persisted to file
@@ -141,6 +160,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   uint32_t pending_send_at_ms;                 // millis() Deadline
   uint32_t pending_created_ms;                 // millis() Planungszeit
   char pending_ping_body[MAX_TEXT_LEN + 1];    // Ping-Body (ohne Senderpräfix)
+  char pending_sender_name[33];                // Absendername für Erwähnung @[Name]
   float pending_snr;                           // SNR aus dem empfangenen Ping
   uint8_t pending_path_len;                    // Pfadlänge aus dem empfangenen Ping
   uint32_t pending_total_delay_ms;             // aufsummierter Delay inkl. Backoffs
@@ -148,7 +168,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   // Sicherheitsnetz gegen zu häufige Echos
   uint32_t last_echo_sent_ms;
 
-  // ---- NEU: Zeit-Persistenz (nur beim Setzen) ----
+  // ---- Zeit-Persistenz (nur beim Setzen / Advert) ----
   void saveRTCToFS(uint32_t epoch) {
 #if defined(NRF52_PLATFORM)
     _fs->remove(RTC_FILE_PATH);
@@ -264,7 +284,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (timestamp > curr) {
       getRTCClock()->setCurrentTime(timestamp);
-      // ---- NEU: Nur beim Setzen der Zeit dauerhaft speichern ----
+      // Nur beim Setzen der Zeit dauerhaft speichern
       saveRTCToFS(timestamp);
       Serial.println("   (OK - clock set & saved!)");
     } else {
@@ -346,14 +366,12 @@ protected:
       body = bodybuf;
     }
 
-    /* --------------------- ADDED GUARDS: Self/Loopback & strict ping match --------------------- */
-
-    // 1) Eigene Nachrichten ignorieren (falls Namepräfix vorhanden)
+    // Eigene Nachrichten ignorieren (falls Namepräfix vorhanden)
     if (senderName[0] && strcmp(senderName, _prefs.node_name) == 0) {
       return;
     }
 
-    // 2) Heuristik: sehr wahrscheinliches lokales Loopback
+    // Heuristik: sehr wahrscheinliches lokales Loopback
     if (pkt->isRouteDirect() && pkt->getSNR() == 0.0f && pkt->path_len == 0) {
       return;
     }
@@ -391,6 +409,7 @@ protected:
       Serial.printf("   Received public ping -> scheduling echo for \"%s\"\n", body);
 
       StrHelper::strncpy(pending_ping_body, body, sizeof(pending_ping_body));
+      StrHelper::strncpy(pending_sender_name, senderName, sizeof(pending_sender_name)); // Absender merken
       pending_snr = pkt->getSNR();
       pending_path_len = pkt->path_len;
 
@@ -468,6 +487,7 @@ public:
     pending_send_at_ms = 0;
     pending_created_ms = 0;
     pending_ping_body[0] = 0;
+    pending_sender_name[0] = 0;
     pending_snr = 0.0f;
     pending_path_len = 0;
     pending_total_delay_ms = 0;
@@ -560,6 +580,11 @@ public:
   }
 
   void sendSelfAdvert(int delay_millis) {
+    // NEU: bei jedem Advert aktuelle Uhrzeit persistieren
+    uint32_t now_ts = getRTCClock()->getCurrentTime();
+    saveRTCToFS(now_ts);
+    Serial.printf("   (RTC saved on advert: %lu)\n", (unsigned long)now_ts);
+
     uint8_t app_data[MAX_ADVERT_DATA_SIZE];
     uint8_t app_data_len;
     {
@@ -663,9 +688,13 @@ public:
         }
 
         char replyText[MAX_TEXT_LEN];
+
+        const char* mention = (pending_sender_name[0] != 0) ? pending_sender_name : "unknown";
+
+        // Erwähnung mit @[Absender]
         snprintf(replyText, sizeof(replyText),
-                "ECHO: %s (SNR: %s dB, Route: %s)",
-                pending_ping_body, snr_str, route_str);
+                "ECHO: @[%s] %s (SNR: %s dB, Route: %s)",
+                mention, pending_ping_body, snr_str, route_str);
 
         Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
 
@@ -674,9 +703,13 @@ public:
         memcpy(temp, &now, 4);
         temp[4] = 0;
 
+        // finaler Klartext inkl. Node-Namen
         snprintf((char*)&temp[5], MAX_TEXT_LEN,
                 "%s: %s", _prefs.node_name, replyText);
-        temp[5 + MAX_TEXT_LEN] = 0;
+        ((char*)&temp[5])[MAX_TEXT_LEN] = 0;
+
+        // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
+        censorPingInplace((char*)&temp[5]);
 
         int outlen = strlen((char*)&temp[5]);
         auto pkt2 = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT,
@@ -694,6 +727,7 @@ public:
         // Reset pending state
         has_pending_echo = false;
         pending_ping_body[0] = 0;
+        pending_sender_name[0] = 0;
         pending_snr = 0.0f;
         pending_path_len = 0;
         pending_total_delay_ms = 0;
