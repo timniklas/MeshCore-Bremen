@@ -133,6 +133,46 @@ static void censorPingInplace(char* s) {
   }
 }
 
+/* ------------------------- Converts route to comma-separated hex string ------------------------ 
+// out: pointer to target string
+// out_size: max size of target string
+// route: array containing the route
+// route_len: number of used entries in route array
+// Hint: in any case, there is a \0 written.
+*/
+void routeToHexString(char *out, uint8_t out_size, const uint8_t* route, uint8_t route_len) {
+    char* p = out;
+    size_t remaining = (size_t)out_size;
+    int written = 0;
+
+    if (out_size < 1) {
+      // out is too small for anything
+      return;
+    }
+
+
+    for (uint8_t i = 0; i < route_len; ++i) {
+      if (remaining < 4) { // check if we have space for "XX,\0" or "XX\0"
+        break;
+      }
+
+      if (i < route_len - 1) {
+	written = snprintf(p, remaining, "%02X,", route[i]);
+      } else {
+	written = snprintf(p, remaining, "%02X", route[i]);
+      }
+
+      if (written < 0 || written >= (int)remaining) {
+        // Error or buffer overflow
+        break;
+      }
+      p += written;
+      remaining -= written;
+    }
+    *p = '\0'; // ensure null termination
+  }
+
+
 /* -------------------------------------------------------------------------------------- */
 
 struct NodePrefs {  // persisted to file
@@ -163,6 +203,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   char pending_sender_name[33];                // Absendername für Erwähnung @[Name]
   float pending_snr;                           // SNR aus dem empfangenen Ping
   uint8_t pending_path_len;                    // Pfadlänge aus dem empfangenen Ping
+  uint8_t pending_path[64];                    // Pfad
   uint32_t pending_total_delay_ms;             // aufsummierter Delay inkl. Backoffs
   bool pending_has_direct_snr;                 // true, wenn Route direkt ist
 
@@ -400,12 +441,12 @@ protected:
       char snr_str[12];
       dtostrf(pkt->getSNR(), 0, 1, snr_str);
 
-      char route_str[24];
+      char route_str[64];  // space for first 21 hops
       bool route_is_direct = (pkt->isRouteDirect() || pkt->path_len == 0);
       if (route_is_direct) {
         strcpy(route_str, "direct");
       } else {
-        snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pkt->path_len);
+        routeToHexString(route_str, sizeof(route_str), pkt->path, (unsigned)pkt->path_len);
       }
 
       Serial.printf("   Received public ping -> scheduling echo for \"%s\"\n", body);
@@ -414,6 +455,9 @@ protected:
       StrHelper::strncpy(pending_sender_name, senderName, sizeof(pending_sender_name)); // Absender merken
       pending_snr = pkt->getSNR();
       pending_path_len = pkt->path_len;
+      if (pkt->path_len > 0) {
+	memcpy(pending_path, pkt->path, pkt->path_len);
+      }
       pending_has_direct_snr = route_is_direct;
 
       uint32_t base_delay = randBetween(ECHO_MIN_DELAY_MS, ECHO_MAX_DELAY_MS);
@@ -686,11 +730,11 @@ public:
         char snr_str[12];
         dtostrf(pending_snr, 0, 1, snr_str);
 
-        char route_str[24];
+        char route_str[64];  // space for first 21 hops
         if (pending_path_len == 0) {
           strcpy(route_str, "direct");
         } else {
-          snprintf(route_str, sizeof(route_str), "%u hops", (unsigned)pending_path_len);
+          routeToHexString(route_str, sizeof(route_str), pending_path, (unsigned)pending_path_len);
         }
 
         char replyText[MAX_TEXT_LEN];
