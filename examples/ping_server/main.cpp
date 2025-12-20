@@ -18,8 +18,6 @@
 
 /* ---------------------------------- CONFIGURATION ------------------------------------- */
 
-#define FIRMWARE_VER_TEXT   "v2 (build: 16 Nov 2025)"
-
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
 #endif
@@ -133,45 +131,66 @@ static void censorPingInplace(char* s) {
   }
 }
 
-/* ------------------------- Converts route to comma-separated hex string ------------------------ 
-// out: pointer to target string
-// out_size: max size of target string
-// route: array containing the route
-// route_len: number of used entries in route array
-// Hint: in any case, there is a \0 written.
+/* ------------------------- Converts route to comma-separated hex string ------------------------
+   out: pointer to target string
+   out_size: max size of target string
+   route: array containing the route
+   route_len: number of used entries in route array
+   Hint: in any case, there is a \0 written.
 */
 void routeToHexString(char *out, uint8_t out_size, const uint8_t* route, uint8_t route_len) {
-    char* p = out;
-    size_t remaining = (size_t)out_size;
-    int written = 0;
+  char* p = out;
+  size_t remaining = (size_t)out_size;
+  int written = 0;
 
-    if (out_size < 1) {
-      // out is too small for anything
-      return;
-    }
-
-
-    for (uint8_t i = 0; i < route_len; ++i) {
-      if (remaining < 4) { // check if we have space for "XX,\0" or "XX\0"
-        break;
-      }
-
-      if (i < route_len - 1) {
-	written = snprintf(p, remaining, "%02X,", route[i]);
-      } else {
-	written = snprintf(p, remaining, "%02X", route[i]);
-      }
-
-      if (written < 0 || written >= (int)remaining) {
-        // Error or buffer overflow
-        break;
-      }
-      p += written;
-      remaining -= written;
-    }
-    *p = '\0'; // ensure null termination
+  if (out_size < 1) {
+    // out is too small for anything
+    return;
   }
 
+  for (uint8_t i = 0; i < route_len; ++i) {
+    if (remaining < 4) { // check if we have space for "XX,\0" or "XX\0"
+      break;
+    }
+
+    if (i < route_len - 1) {
+      written = snprintf(p, remaining, "%02X,", route[i]);
+    } else {
+      written = snprintf(p, remaining, "%02X", route[i]);
+    }
+
+    if (written < 0 || written >= (int)remaining) {
+      // Error or buffer overflow
+      break;
+    }
+    p += written;
+    remaining -= written;
+  }
+  *p = '\0'; // ensure null termination
+}
+
+/* --------------------------------------------------------------------------------------
+   WICHTIGER FIX:
+   Statt VolatileRTCClock (die oft NICHT tickt) verwenden wir eine RTCClock,
+   die auf millis() basiert und zwischen set/get korrekt weiterläuft.
+-------------------------------------------------------------------------------------- */
+class MillisRTCClock : public mesh::RTCClock {
+  uint32_t base_epoch = 0;
+  uint32_t base_ms = 0;
+
+public:
+  uint32_t getCurrentTime() override {
+    if (base_epoch == 0) return 0;
+    uint32_t now_ms = millis();
+    uint32_t delta_s = (now_ms - base_ms) / 1000U;
+    return base_epoch + delta_s;
+  }
+
+  void setCurrentTime(uint32_t t) override {
+    base_epoch = t;
+    base_ms = millis();
+  }
+};
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -324,14 +343,10 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
 
   void setClock(uint32_t timestamp) {
     uint32_t curr = getRTCClock()->getCurrentTime();
-    if (timestamp > curr) {
-      getRTCClock()->setCurrentTime(timestamp);
-      // Nur beim Setzen der Zeit dauerhaft speichern
-      saveRTCToFS(timestamp);
-      Serial.println("   (OK - clock set & saved!)");
-    } else {
-      Serial.println("   (ERR: clock cannot go backwards)");
-    }
+    getRTCClock()->setCurrentTime(timestamp);
+    // Nur beim Setzen der Zeit dauerhaft speichern
+    saveRTCToFS(timestamp);
+    Serial.println("   (OK - clock set & saved!)");
   }
 
 protected:
@@ -456,7 +471,7 @@ protected:
       pending_snr = pkt->getSNR();
       pending_path_len = pkt->path_len;
       if (pkt->path_len > 0) {
-	memcpy(pending_path, pkt->path, pkt->path_len);
+        memcpy(pending_path, pkt->path, pkt->path_len);
       }
       pending_has_direct_snr = route_is_direct;
 
@@ -514,7 +529,7 @@ protected:
     return SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * pkt_airtime_millis);
   }
   uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override {
-    return SEND_TIMEOUT_BASE_MILLIS + 
+    return SEND_TIMEOUT_BASE_MILLIS +
          ( (pkt_airtime_millis*DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) * (path_len + 1));
   }
 
@@ -650,7 +665,7 @@ public:
   void onContactVisit(const ContactInfo& contact) override {
     Serial.printf("   %s - ", contact.name);
     char tmp[40];
-    int32_t secs = contact.last_advert_timestamp - getRTCClock()->getCurrentTime();
+    int32_t secs = (int32_t)(getRTCClock()->getCurrentTime() - contact.last_advert_timestamp);
     AdvertTimeHelper::formatRelativeTimeDiff(tmp, secs, false);
     Serial.println(tmp);
   }
@@ -664,12 +679,10 @@ public:
     } else if (strcmp(command, "clock") == 0) {    // show current time
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
-      Serial.printf(   "%02d:%02d - %d/%d/%d UTC\n", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+      Serial.printf("%02d:%02d - %d/%d/%d UTC\n", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
       setClock(secs);
-    } else if (memcmp(command, "ver", 3) == 0) {
-      Serial.println(FIRMWARE_VER_TEXT);
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
       if (memcmp(config, "name ", 5) == 0) {
@@ -695,6 +708,8 @@ public:
       Serial.println("Commands:");
       Serial.println("   set {name|lat|lon|tx} {value}");
       Serial.println("   advert");
+      Serial.println("   clock");
+      Serial.println("   time <epoch_seconds>");
     } else {
       Serial.print("   ERROR: unknown command: "); Serial.println(command);
     }
@@ -704,15 +719,15 @@ public:
     BaseChatMesh::loop();
 
     int len = strlen(command);
-    while (Serial.available() && len < sizeof(command)-1) {
+    while (Serial.available() && len < (int)sizeof(command)-1) {
       char c = Serial.read();
-      if (c != '\n') { 
+      if (c != '\n') {
         command[len++] = c;
         command[len] = 0;
       }
       Serial.print(c);
     }
-    if (len == sizeof(command)-1) {  // command buffer full
+    if (len == (int)sizeof(command)-1) {  // command buffer full
       command[sizeof(command)-1] = '\r';
     }
 
@@ -761,7 +776,7 @@ public:
 
         // finaler Klartext inkl. Node-Namen
         snprintf((char*)&temp[5], MAX_TEXT_LEN,
-                "%s: %s", _prefs.node_name, replyText);
+                 "%s: %s", _prefs.node_name, replyText);
         ((char*)&temp[5])[MAX_TEXT_LEN] = 0;
 
         // HIER: "ping" -> "p*ng" im finalen Text (inkl. Namen)
@@ -802,7 +817,7 @@ public:
     uint32_t now = getRTCClock()->getCurrentTime();
     DateTime dt = DateTime(now);
     char buffer[32];
-    sprintf(buffer, "%02d.%02d.%d %02d:%02d UTC", 
+    sprintf(buffer, "%02d.%02d.%d %02d:%02d UTC",
             dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
     display.print(buffer);
     display.endFrame();
@@ -812,7 +827,11 @@ public:
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
-MyMesh the_mesh(radio_driver, fast_rng, *new VolatileRTCClock(), tables); // TODO: test with 'rtc_clock' in target.cpp
+
+// FIX: tickende RTC statt VolatileRTCClock
+MillisRTCClock tick_rtc;
+
+MyMesh the_mesh(radio_driver, fast_rng, tick_rtc, tables);
 
 void halt() {
   while (1) ;
