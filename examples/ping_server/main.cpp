@@ -453,8 +453,8 @@ protected:
       }
 #endif
 
-      char snr_str[12];
-      dtostrf(pkt->getSNR(), 0, 1, snr_str);
+      char snr_str[16];
+      snprintf(snr_str, sizeof(snr_str), "%.1f", pkt->getSNR());
 
       char route_str[64];  // space for first 21 hops
       bool route_is_direct = (pkt->isRouteDirect() || pkt->path_len == 0);
@@ -742,8 +742,8 @@ public:
     if (has_pending_echo) {
       uint32_t now_ms = _ms->getMillis();
       if ((int32_t)(now_ms - pending_send_at_ms) >= 0) {
-        char snr_str[12];
-        dtostrf(pending_snr, 0, 1, snr_str);
+        char snr_str[16];
+        snprintf(snr_str, sizeof(snr_str), "%.1f", pending_snr);
 
         char route_str[64];  // space for first 21 hops
         if (pending_path_len == 0) {
