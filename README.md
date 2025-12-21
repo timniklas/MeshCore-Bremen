@@ -24,7 +24,7 @@ die mit dem offiziellen MeshCore-Ökosystem vollständig kompatibel sind.
 Dieser Fork ergänzt den offiziellen MeshCore-Flasher um neue Rollen,  
 die du über den **„Custom Firmware“-Button** (ganz unten im Web-Flasher) installieren kannst:
 
-👉 **[https://flasher.meshtastic.org](https://flasher.meshtastic.org)**
+👉 **[https://flasher.meshcore.co.uk](https://flasher.meshcore.co.uk)**
 
 Wähle dein Board, klicke auf **„Custom Firmware“**,  
 und lade die gewünschte `.bin`-Datei hoch (z. B. `ping_server.bin`).
@@ -51,12 +51,35 @@ und lade die gewünschte `.bin`-Datei hoch (z. B. `ping_server.bin`).
 Companion → sendet ping → Ping Server antwortet → Reichweite sichtbar
 ```
 
+#### 🤖 Telegram Room Server
+
+Eine optionale Rolle, die eingehende/ausgehende Nachrichten zwischen dem Mesh und einem Telegram‑Chat bridged.
+
+Kurz:
+- Leitet neue Mesh‑Posts an einen konfigurierten Telegram‑Chat weiter.
+- Injiziert Telegram‑Nachrichten als Posts in den Room Server.
+
+Wichtiges Verhalten und Features:
+- Änderungen per serieller Konsole:
+  - set net ssid <WIFI_SSID>
+  - set net pass <WIFI_PASS>
+  - set net token <TELEGRAM_BOT_TOKEN>
+  - set net chat <TELEGRAM_CHAT_ID>  ← ändert Chat und löscht lokalen Chat‑Cache
+  - show net  (zeigt aktuelle Werte aus /net_config)
+- Beim Ändern der Chat‑ID wird der lokale Post‑Cache gelöscht (damit alte Chatnachrichten nicht zum neuen Chat gehören).
+- Datenschutz: Bot‑Token sollten vertraulich behandelt werden. Im Log werden Tokens standardmäßig nicht ausgegeben.
+
+Kurzanleitung:
+1. Setze Bot Token und Chat ID via `set net token ...` und `set net chat ...`.
+2. Verbinde das Gerät mit WLAN (persistente Werte werden verwendet).
+3. Der Server pusht Posts an Telegram und injiziert Telegram‑Nachrichten ins Mesh. Fotos resultieren in einem Kamerasymbol-Post.
+
 ---
 
 
 ## 🚀 Flash-Anleitung
 
-1. Öffne [https://flasher.meshtastic.org](https://flasher.meshtastic.org)  
+1. Öffne [https://flasher.meshcore.co.uk](https://flasher.meshcore.co.uk)  
 2. Wähle dein Gerät (z. B. Heltec, LilyGo T-Beam, RAK Wireless RAK4631)  
 3. Scrolle nach unten und klicke auf **„Custom Firmware“**  
 4. Lade die gewünschte `.bin`-Datei hoch (z. B. `ping_server.bin`)  
