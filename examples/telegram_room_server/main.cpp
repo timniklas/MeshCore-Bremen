@@ -49,23 +49,43 @@ int32_t telegram_last_update_id = 0;
 
 ClientInfo telegramClient; // temporärer "Autor" für Telegram-Nachrichten
 
-static String urlEncode(const String &s) {
-  String r;
-  for (size_t i = 0; i < s.length(); i++) {
-    char c = s[i];
-    if (('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') ||
-        c == '-' || c == '_' || c == '.' || c == '~') {
-      r += c;
-    } else if (c == ' ') {
-      r += '%'; r += '2'; r += '0';
-    } else {
-      char buf[4];
-      sprintf(buf, "%%%02X", (uint8_t)c);
-      r += buf;
-    }
+// Runtime config (populated from /net_config at boot or via console)
+static String RUNTIME_WIFI_SSID = String(WIFI_SSID);
+static String RUNTIME_WIFI_PASS = String(WIFI_PASS);
+static String RUNTIME_TELEGRAM_BOT_TOKEN = String(TELEGRAM_BOT_TOKEN);
+static String RUNTIME_TELEGRAM_CHAT_ID = String(TELEGRAM_CHAT_ID);
+
+// --- Neuer: Runtime Setter API (extern aufrufbar von MyMesh.cpp) ---
+void runtimeSetWifi(const char* ssid, const char* pass) {
+  RUNTIME_WIFI_SSID = String(ssid);
+  RUNTIME_WIFI_PASS = String(pass);
+  Serial.println("runtime: updating WiFi credentials");
+  WiFi.disconnect(true);
+  delay(200);
+  WiFi.begin(RUNTIME_WIFI_SSID.c_str(), RUNTIME_WIFI_PASS.c_str());
+  unsigned long start = millis();
+  while (millis() - start < 10000 && WiFi.status() != WL_CONNECTED) {
+    delay(200);
   }
-  return r;
+  g_isOnline = (WiFi.status() == WL_CONNECTED);
+  Serial.print("runtime WiFi connected: ");
+  Serial.println(g_isOnline ? "yes" : "no");
 }
+
+void runtimeSetToken(const char* token) {
+  RUNTIME_TELEGRAM_BOT_TOKEN = String(token);
+  // reset update offset so fetch starts fresh
+  telegram_last_update_id = 0;
+  Serial.println("runtime: telegram token updated");
+}
+
+void runtimeSetChat(const char* chat) {
+  RUNTIME_TELEGRAM_CHAT_ID = String(chat);
+  // reset update offset so fetch starts fresh
+  telegram_last_update_id = 0;
+  Serial.println("runtime: telegram chat updated");
+}
+// --- Ende: ESP32-spezifischer Block
 
 void sendTelegramMessage(const char *text) {
   #ifdef ESP32
@@ -75,13 +95,13 @@ void sendTelegramMessage(const char *text) {
   }
 
   HTTPClient http;
-  String url = String("https://api.telegram.org/bot") + TELEGRAM_BOT_TOKEN + "/sendMessage";
+  String url = String("https://api.telegram.org/bot") + RUNTIME_TELEGRAM_BOT_TOKEN + "/sendMessage";
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
 
   // build JSON payload; send chat_id as string (works for @username or numeric ids)
   String payload = "{\"chat_id\":\"";
-  payload += String(TELEGRAM_CHAT_ID);
+  payload += RUNTIME_TELEGRAM_CHAT_ID;
   payload += "\",\"text\":\"";
   // rudimentary escaping for quotes and backslashes
   String t = String(text);
@@ -115,7 +135,7 @@ void fetchTelegramUpdates() {
   #ifdef ESP32
   if (WiFi.status() != WL_CONNECTED) { g_isOnline = false; return; }
   HTTPClient http;
-  String u = String("https://api.telegram.org/bot") + TELEGRAM_BOT_TOKEN + "/getUpdates?timeout=0";
+  String u = String("https://api.telegram.org/bot") + RUNTIME_TELEGRAM_BOT_TOKEN + "/getUpdates?timeout=0";
   if (telegram_last_update_id > 0) {
     u += "&offset=" + String((long)(telegram_last_update_id + 1));
   }
@@ -138,6 +158,46 @@ void fetchTelegramUpdates() {
         }
       }
       return -1;
+    };
+
+    // Helper: convert JSON-style \uXXXX escapes to UTF-8 in-place
+    auto unescapeUnicode = [&](String &s) {
+      String out;
+      int L = s.length();
+      for (int i = 0; i < L; i++) {
+        char c = s.charAt(i);
+        if (c == '\\' && i + 5 < L && s.charAt(i+1) == 'u') {
+          // parse 4 hex digits
+          int code = 0;
+          bool ok = true;
+          for (int k = 0; k < 4; k++) {
+            char h = s.charAt(i+2+k);
+            int v = 0;
+            if (h >= '0' && h <= '9') v = h - '0';
+            else if (h >= 'a' && h <= 'f') v = 10 + (h - 'a');
+            else if (h >= 'A' && h <= 'F') v = 10 + (h - 'A');
+            else { ok = false; break; }
+            code = (code << 4) | v;
+          }
+          if (ok) {
+            // encode as UTF-8 (BMP only)
+            if (code < 0x80) {
+              out += (char)code;
+            } else if (code < 0x800) {
+              out += (char)(0xC0 | ((code >> 6) & 0x1F));
+              out += (char)(0x80 | (code & 0x3F));
+            } else {
+              out += (char)(0xE0 | ((code >> 12) & 0x0F));
+              out += (char)(0x80 | ((code >> 6) & 0x3F));
+              out += (char)(0x80 | (code & 0x3F));
+            }
+            i += 5; // skip processed \ u XXXX
+            continue;
+          }
+        }
+        out += c;
+      }
+      s = out;
     };
 
     // Helper: extract top-level string field inside [blkStart..blkEnd] for field name (depth==1)
@@ -183,6 +243,13 @@ void fetchTelegramUpdates() {
               // minimal unescape
               val.replace("\\\"", "\"");
               val.replace("\\\\", "\\");
+              // common escaped whitespace sequences -> actual chars
+              val.replace("\\n", "\n");
+              val.replace("\\r", "\r");
+              val.replace("\\t", "\t");
+              val.replace("\\/", "/");
+              // decode any \uXXXX escapes to UTF-8
+              unescapeUnicode(val);
               return val;
             } else {
               // not a string (number/null) -> return empty
@@ -318,7 +385,26 @@ void fetchTelegramUpdates() {
       tmpClient.last_timestamp = 0;
 
       g_isInjectingTelegram = true;
-      the_mesh.addPost(&tmpClient, text.c_str());
+      // Split multiline Telegram text into separate posts (one per line)
+      {
+        String full = text;
+        int pos = 0;
+        while (pos <= full.length()) {
+          int nl = full.indexOf('\n', pos);
+          String line;
+          if (nl < 0) {
+            line = full.substring(pos);
+            pos = full.length() + 1;
+          } else {
+            line = full.substring(pos, nl);
+            pos = nl + 1;
+          }
+          line.trim();
+          if (line.length() > 0) {
+            the_mesh.addPost(&tmpClient, line.c_str());
+          }
+        }
+      }
       g_isInjectingTelegram = false;
 
       idx = comma + 1;
@@ -435,13 +521,20 @@ void setup() {
       Serial.println("Failed to create /net_config");
     }
   }
+
+  // Ensure runtime variables reflect loaded config BEFORE connecting to WiFi
+  RUNTIME_WIFI_SSID = cfg_ssid;
+  RUNTIME_WIFI_PASS = cfg_pass;
+  RUNTIME_TELEGRAM_BOT_TOKEN = cfg_bot_token;
+  RUNTIME_TELEGRAM_CHAT_ID = cfg_chat_id;
+
   // optional: print loaded values (avoid printing token in cleartext unless needed)
   Serial.print("Configured WiFi SSID: ");
   Serial.println(cfg_ssid);
   // Serial.print("Configured Telegram token: "); Serial.println(cfg_bot_token);
 
   // WLAN verbinden (use loaded config)
-  WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
+  WiFi.begin(RUNTIME_WIFI_SSID.c_str(), RUNTIME_WIFI_PASS.c_str());
   Serial.print("Connecting to WiFi ");
   Serial.println(cfg_ssid);
   unsigned long start = millis();

@@ -5,6 +5,11 @@ extern void sendTelegramMessage(const char *text);
 extern bool g_isInjectingTelegram;
 extern bool g_isOnline; // <-- neu: externes Online-Flag
 extern int32_t telegram_last_update_id; // <-- neu: reset when chat changes
+
+// Runtime setters implemented in main.cpp
+extern void runtimeSetWifi(const char* ssid, const char* pass);
+extern void runtimeSetToken(const char* token);
+extern void runtimeSetChat(const char* chat);
 #endif
 
 #define REPLY_DELAY_MILLIS          1500
@@ -863,6 +868,20 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
         w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
         w.close();
+
+        // apply new runtime settings immediately
+        #ifdef ESP32
+        runtimeSetWifi(ssid.c_str(), pass.c_str());
+        #endif
+
+        // Clear cached chat/history so old messages are not reused for the new chat_id
+        clearChatCache();
+        #ifdef ESP32
+        telegram_last_update_id = 0; // reset update offset so fetch starts fresh for new chat
+       // inform runtime about new chat id as well
+       runtimeSetChat(chat.c_str());
+        #endif
+
         strcpy(reply, "OK");
       } else {
         strcpy(reply, "ERR");
@@ -902,6 +921,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
         w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
         w.close();
+
+        // apply new runtime settings immediately
+        #ifdef ESP32
+        runtimeSetWifi(ssid.c_str(), pass.c_str());
+        #endif
+
         strcpy(reply, "OK");
       } else {
         strcpy(reply, "ERR");
@@ -941,6 +966,11 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
         w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
         w.close();
+
+        #ifdef ESP32
+        runtimeSetToken(token.c_str());
+        #endif
+
         strcpy(reply, "OK");
       } else {
         strcpy(reply, "ERR");
@@ -985,6 +1015,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         clearChatCache();
         #ifdef ESP32
         telegram_last_update_id = 0; // reset update offset so fetch starts fresh for new chat
+       // inform runtime about new chat id as well
+       runtimeSetChat(chat.c_str());
         #endif
 
         strcpy(reply, "OK");
