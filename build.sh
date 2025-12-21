@@ -194,11 +194,23 @@ build_ping_server_firmwares() {
 
 }
 
+build_telegram_room_firmwares() {
+
+#  # build specific room server firmwares
+#  build_firmware "Heltec_v3_room_server"
+#  build_firmware "RAK_4631_room_server"
+
+  # build all room server firmwares
+  build_all_firmwares_by_suffix "_telegram_room_server"
+
+}
+
 build_firmwares() {
   build_companion_firmwares
   build_repeater_firmwares
   build_room_server_firmwares
   build_ping_server_firmwares
+  build_telegram_room_firmwares
 }
 
 # clean build dir
@@ -233,4 +245,6 @@ elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
 elif [[ $1 == "build-ping-server-firmwares" ]]; then
   build_ping_server_firmwares
+elif [[ $1 == "build-telegram-room-firmwares" ]]; then
+  build_telegram_room_firmwares
 fi

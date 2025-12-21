@@ -4,6 +4,7 @@
 extern void sendTelegramMessage(const char *text);
 extern bool g_isInjectingTelegram;
 extern bool g_isOnline; // <-- neu: externes Online-Flag
+extern int32_t telegram_last_update_id; // <-- neu: reset when chat changes
 #endif
 
 #define REPLY_DELAY_MILLIS          1500
@@ -26,6 +27,8 @@ extern bool g_isOnline; // <-- neu: externes Online-Flag
 #define RESP_SERVER_LOGIN_OK        0 // response to ANON_REQ
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
+
+#define RTC_SAVE_INTERVAL_SECS 60   // min. Sekunden zwischen Flash-Writes
 
 struct ServerStats {
   uint16_t batt_milli_volts;
@@ -56,9 +59,29 @@ void MyMesh::addPost(ClientInfo *client, const char *postData) {
   _num_posted++; // stats
 
 #ifdef ESP32
-  // Wenn diese Post NICHT gerade von Telegram injiziert wurde, an Telegram weiterleiten
-  if (!g_isInjectingTelegram) {
-    sendTelegramMessage(postData);
+  // Wenn diese Post NICHT gerade von Telegram injiziert wurde, und wir online sind, an Telegram weiterleiten
+  if (!g_isInjectingTelegram && g_isOnline) {
+    char sendbuf[512];
+    // Try to resolve a human-readable contact name (from /contacts). If found, use it.
+    char contact_name[33];
+    bool have_name = lookupContactName(client->id.pub_key, contact_name, sizeof(contact_name));
+    if (have_name && contact_name[0]) {
+      // Use contact name (format: "NAME: text")
+      snprintf(sendbuf, sizeof(sendbuf), "%s: %s", contact_name, postData);
+    } else {
+      // fallback: build prefix from author's pub_key (first 6 bytes) as hex (format: "HEX: text")
+      char pfx[16];
+      int n = 0;
+      const int HEX_BYTES = 6;
+      for (int i = 0; i < HEX_BYTES && i < PUB_KEY_SIZE; i++) {
+        n += snprintf(&pfx[n], sizeof(pfx) - n, "%02X", client->id.pub_key[i]);
+      }
+      snprintf(sendbuf, sizeof(sendbuf), "%s: %s", pfx, postData);
+    }
+    MESH_DEBUG_PRINTLN("Forwarding post to Telegram: %s", sendbuf);
+    sendTelegramMessage(sendbuf);
+  } else {
+    MESH_DEBUG_PRINTLN("Not forwarding to Telegram (inject=%d, online=%d)", (int)g_isInjectingTelegram, (int)g_isOnline);
   }
 #endif
 }
@@ -95,6 +118,9 @@ void MyMesh::pushPostToClient(ClientInfo *client, PostInfo &post) {
           futureMillis(PUSH_TIMEOUT_BASE + PUSH_ACK_TIMEOUT_FACTOR * (client->out_path_len + 1));
     }
     _num_post_pushes++; // stats
+
+    // After successfully sending a post to a client, persist RTC occasionally to avoid regressions on reboot
+    saveRTCTimestamp();
   } else {
     client->extra.room.pending_ack = 0;
     MESH_DEBUG_PRINTLN("Unable to push post to client");
@@ -144,7 +170,7 @@ File MyMesh::openAppend(const char *fname) {
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload,
                           size_t payload_len) {
-  // uint32_t now = getRTCClock()->getCurrentTimeUnique();
+  // uint32_t now = getRTCClock()->getCurrentTime();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
 
@@ -336,6 +362,9 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
         MESH_DEBUG_PRINTLN("possible replay attack!");
         return;
       }
+
+      // Persist contact immediately so /contacts exists for lookupContactName
+      saveContactEntry(client); // <-- neu: persistenten Eintrag anlegen
 
       MESH_DEBUG_PRINTLN("Login success!");
       client->last_timestamp = sender_timestamp;
@@ -659,8 +688,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
+  _last_rtc_saved = 0; // init
+
   // load persisted prefs
   _cli.loadPrefs(_fs);
+
+  // --- restore saved RTC if available ---
+  loadRTCTimestamp();
 
   acl.load(_fs);
 
@@ -704,6 +738,8 @@ void MyMesh::sendSelfAdvertisement(int delay_millis) {
   mesh::Packet *pkt = createSelfAdvert();
   if (pkt) {
     sendFlood(pkt, delay_millis);
+    // persist RTC time after sending advert (but internal function will throttle writes)
+    saveRTCTimestamp();
   } else {
     MESH_DEBUG_PRINTLN("ERROR: unable to create advertisement packet!");
   }
@@ -781,10 +817,204 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   while (*command == ' ')
     command++; // skip leading spaces
 
-  if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
-    memcpy(reply, command, 3);                    // reflect the prefix back
-    reply += 3;
-    command += 3;
+  // -- network / telegram config commands (console) --
+  // set net ssid <value>
+  // set net pass <value>
+  // set net token <value>
+  // set net chat <value>
+  // show net
+  if (memcmp(command, "set net ", 8) == 0) {
+    char *arg = &command[8];
+    while (*arg == ' ') arg++;
+    if (memcmp(arg, "ssid ", 5) == 0) {
+      const char* val = arg + 5;
+      // write new config file with updated ssid
+      const char* fname = "/net_config";
+      // read existing values
+      String ssid = "", pass = "", token = "", chat = "";
+      if (_fs->exists(fname)) {
+        File f = _fs->open(fname);
+        if (f) {
+          while (f.available()) {
+            String line = f.readStringUntil('\n');
+            int eq = line.indexOf('=');
+            if (eq > 0) {
+              String k = line.substring(0, eq); String v = line.substring(eq+1);
+              k.trim(); v.trim();
+              if (k == "WIFI_SSID") ssid = v;
+              else if (k == "WIFI_PASS") pass = v;
+              else if (k == "TELEGRAM_BOT_TOKEN") token = v;
+              else if (k == "TELEGRAM_CHAT_ID") chat = v;
+            }
+          }
+          f.close();
+        }
+      }
+      ssid = String(val);
+      // write back
+  #if defined(RP2040_PLATFORM)
+      File w = _fs->open(fname, "w");
+  #else
+      File w = _fs->open(fname, "w", true);
+  #endif
+      if (w) {
+        w.printf("WIFI_SSID=%s\n", ssid.c_str());
+        w.printf("WIFI_PASS=%s\n", pass.c_str());
+        w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
+        w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
+        w.close();
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "ERR");
+      }
+      return;
+    } else if (memcmp(arg, "pass ", 5) == 0) {
+      const char* val = arg + 5;
+      const char* fname = "/net_config";
+      String ssid = "", pass = "", token = "", chat = "";
+      if (_fs->exists(fname)) {
+        File f = _fs->open(fname);
+        if (f) {
+          while (f.available()) {
+            String line = f.readStringUntil('\n');
+            int eq = line.indexOf('=');
+            if (eq > 0) {
+              String k = line.substring(0, eq); String v = line.substring(eq+1);
+              k.trim(); v.trim();
+              if (k == "WIFI_SSID") ssid = v;
+              else if (k == "WIFI_PASS") pass = v;
+              else if (k == "TELEGRAM_BOT_TOKEN") token = v;
+              else if (k == "TELEGRAM_CHAT_ID") chat = v;
+            }
+          }
+          f.close();
+        }
+      }
+      pass = String(val);
+  #if defined(RP2040_PLATFORM)
+      File w = _fs->open(fname, "w");
+  #else
+      File w = _fs->open(fname, "w", true);
+  #endif
+      if (w) {
+        w.printf("WIFI_SSID=%s\n", ssid.c_str());
+        w.printf("WIFI_PASS=%s\n", pass.c_str());
+        w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
+        w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
+        w.close();
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "ERR");
+      }
+      return;
+    } else if (memcmp(arg, "token ", 6) == 0) {
+      const char* val = arg + 6;
+      const char* fname = "/net_config";
+      String ssid = "", pass = "", token = "", chat = "";
+      if (_fs->exists(fname)) {
+        File f = _fs->open(fname);
+        if (f) {
+          while (f.available()) {
+            String line = f.readStringUntil('\n');
+            int eq = line.indexOf('=');
+            if (eq > 0) {
+              String k = line.substring(0, eq); String v = line.substring(eq+1);
+              k.trim(); v.trim();
+              if (k == "WIFI_SSID") ssid = v;
+              else if (k == "WIFI_PASS") pass = v;
+              else if (k == "TELEGRAM_BOT_TOKEN") token = v;
+              else if (k == "TELEGRAM_CHAT_ID") chat = v;
+            }
+          }
+          f.close();
+        }
+      }
+      token = String(val);
+  #if defined(RP2040_PLATFORM)
+      File w = _fs->open(fname, "w");
+  #else
+      File w = _fs->open(fname, "w", true);
+  #endif
+      if (w) {
+        w.printf("WIFI_SSID=%s\n", ssid.c_str());
+        w.printf("WIFI_PASS=%s\n", pass.c_str());
+        w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
+        w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
+        w.close();
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "ERR");
+      }
+      return;
+    } else if (memcmp(arg, "chat ", 5) == 0) {
+      const char* val = arg + 5;
+      const char* fname = "/net_config";
+      String ssid = "", pass = "", token = "", chat = "";
+      if (_fs->exists(fname)) {
+        File f = _fs->open(fname);
+        if (f) {
+          while (f.available()) {
+            String line = f.readStringUntil('\n');
+            int eq = line.indexOf('=');
+            if (eq > 0) {
+              String k = line.substring(0, eq); String v = line.substring(eq+1);
+              k.trim(); v.trim();
+              if (k == "WIFI_SSID") ssid = v;
+              else if (k == "WIFI_PASS") pass = v;
+              else if (k == "TELEGRAM_BOT_TOKEN") token = v;
+              else if (k == "TELEGRAM_CHAT_ID") chat = v;
+            }
+          }
+          f.close();
+        }
+      }
+      chat = String(val);
+  #if defined(RP2040_PLATFORM)
+      File w = _fs->open(fname, "w");
+  #else
+      File w = _fs->open(fname, "w", true);
+  #endif
+      if (w) {
+        w.printf("WIFI_SSID=%s\n", ssid.c_str());
+        w.printf("WIFI_PASS=%s\n", pass.c_str());
+        w.printf("TELEGRAM_BOT_TOKEN=%s\n", token.c_str());
+        w.printf("TELEGRAM_CHAT_ID=%s\n", chat.c_str());
+        w.close();
+
+        // Clear cached chat/history so old messages are not reused for the new chat_id
+        clearChatCache();
+        #ifdef ESP32
+        telegram_last_update_id = 0; // reset update offset so fetch starts fresh for new chat
+        #endif
+
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "ERR");
+      }
+      return;
+    }
+  }
+  if (memcmp(command, "show net", 8) == 0) {
+    const char* fname = "/net_config";
+    if (!_fs || !_fs->exists(fname)) {
+      strcpy(reply, "no net config");
+      return;
+    }
+    File f = _fs->open(fname);
+    if (!f) { strcpy(reply, "err open"); return; }
+    // read into reply (truncate if too long)
+    size_t ofs = 0;
+    while (f.available() && ofs + 1 < 160) {
+      String line = f.readStringUntil('\n');
+      int len = line.length();
+      if (ofs + len + 1 >= 160) break;
+      memcpy(reply + ofs, line.c_str(), len);
+      ofs += len;
+      reply[ofs++] = '\n';
+    }
+    reply[ofs] = 0;
+    f.close();
+    return;
   }
 
   // handle ACL related commands
@@ -924,4 +1154,181 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+}
+
+// --- Neuer Helper: Suche Kontaktname in /contacts (wie simple_secure_chat) ---
+bool MyMesh::lookupContactName(const uint8_t* pubkey, char* out_name, size_t out_len) {
+  if (!_fs) return false;
+  const char* fname = "/contacts";
+  if (!_fs->exists(fname)) return false;
+
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(fname, "r");
+#else
+  File f = _fs->open(fname);
+#endif
+  if (!f) return false;
+
+  while (f.available()) {
+    uint8_t pk[32];
+    char namebuf[33];
+    uint8_t type;
+    uint8_t flags;
+    uint8_t unused;
+    uint32_t reserved;
+    uint8_t out_path_len;
+    uint32_t last_adv;
+    char out_path[64];
+
+    if (f.read(pk, 32) != 32) break;
+    if (f.read((uint8_t*)namebuf, 32) != 32) break;
+    namebuf[32] = 0;
+    if (f.read(&type, 1) != 1) break;
+    if (f.read(&flags, 1) != 1) break;
+    if (f.read(&unused, 1) != 1) break;
+    if (f.read((uint8_t*)&reserved, 4) != 4) break;
+    if (f.read(&out_path_len, 1) != 1) break;
+    if (f.read((uint8_t*)&last_adv, 4) != 4) break;
+    if (f.read((uint8_t*)out_path, 64) != 64) break;
+
+    if (memcmp(pk, pubkey, PUB_KEY_SIZE) == 0) {
+      strncpy(out_name, namebuf, out_len);
+      out_name[out_len - 1] = 0;
+      f.close();
+      return true;
+    }
+  }
+
+  f.close();
+  return false;
+}
+
+// --- Neuer Helfer: append single contact entry im "/contacts" Format (wie simple_secure_chat) ---
+void MyMesh::saveContactEntry(ClientInfo* client) {
+  if (!client || !_fs) return;
+  const char* fname = "/contacts";
+
+  // prepare name: try to write printable short name (first 6 bytes hex) if no better available
+  char namebuf[32];
+  // if ACL had a name field, use it; otherwise fallback to 6-byte hex prefix
+  // Here we build a short hex name as fallback
+  int n = 0;
+  for (int i = 0; i < 6 && i < PUB_KEY_SIZE; i++) {
+    n += snprintf(&namebuf[n], sizeof(namebuf) - n, "%02X", client->id.pub_key[i]);
+  }
+  // pad or terminate
+  if (n < 32) {
+    namebuf[n] = 0;
+  }
+  // open file for append
+  File f = openAppend(fname);
+  if (!f) {
+    MESH_DEBUG_PRINTLN("saveContactEntry: unable to open %s", fname);
+    return;
+  }
+
+  // build minimal contact record matching simple_secure_chat save format:
+  // [32 pub_key][32 name][1 type][1 flags][1 unused][4 reserved][1 out_path_len][4 last_advert_timestamp][64 out_path]
+  uint8_t zero8 = 0;
+  uint32_t reserved = 0;
+  uint8_t out_path_len = 0;
+  uint32_t last_adv = getRTCClock()->getCurrentTime();
+
+  // ensure name field is exactly 32 bytes
+  char namefield[32];
+  memset(namefield, 0, sizeof(namefield));
+  strncpy(namefield, namebuf, sizeof(namefield)-1);
+
+  f.write(client->id.pub_key, 32);
+  f.write((uint8_t*)namefield, 32);
+
+  // type: mark as ROOM if server-like, else CHAT (use CHAT)
+  uint8_t type = ADV_TYPE_CHAT;
+  f.write(&type, 1);
+
+  // flags: 0
+  f.write(&zero8, 1);
+
+  // unused
+  f.write(&zero8, 1);
+
+  // reserved (4 bytes)
+  f.write((uint8_t*)&reserved, 4);
+
+  // out_path_len
+  f.write(&out_path_len, 1);
+
+  // last_advert_timestamp
+  f.write((uint8_t*)&last_adv, 4);
+
+  // out_path (64 bytes zero)
+  uint8_t out_path[64];
+  memset(out_path, 0, sizeof(out_path));
+  f.write(out_path, 64);
+
+  f.close();
+  MESH_DEBUG_PRINTLN("saveContactEntry: appended contact %s", namefield);
+}
+
+// --- Neuer Helper: RTC persistenz ---
+// Liest /last_time und setzt RTC (falls gespeicherte Zeit größer als aktuelle)
+void MyMesh::loadRTCTimestamp() {
+  if (!_fs) return;
+  const char* fname = "/last_time";
+  if (!_fs->exists(fname)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(fname, "r");
+#else
+  File f = _fs->open(fname);
+#endif
+  if (!f) return;
+  uint32_t stored = 0;
+  if (f.read((uint8_t*)&stored, sizeof(stored)) == sizeof(stored)) {
+    uint32_t curr = getRTCClock()->getCurrentTime();
+    if (stored > curr) {
+      getRTCClock()->setCurrentTime(stored);
+      MESH_DEBUG_PRINTLN("RTC restored from storage: %u", (unsigned)stored);
+    }
+    _last_rtc_saved = stored;
+  }
+  f.close();
+}
+
+// Speichert aktuelle RTC-Zeit in /last_time, aber nur, wenn seit letztem Schreibvorgang >= RTC_SAVE_INTERVAL_SECS
+void MyMesh::saveRTCTimestamp() {
+  if (!_fs) return;
+  uint32_t now = getRTCClock()->getCurrentTime();
+  // if RTC is invalid (zero) skip
+  if (now == 0) return;
+
+  if (_last_rtc_saved != 0) {
+    if (now <= _last_rtc_saved) return; // no forward progress
+    if (now - _last_rtc_saved < RTC_SAVE_INTERVAL_SECS) return; // throttle writes
+  }
+  const char* fname = "/last_time";
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(fname, "w");
+#else
+  File f = _fs->open(fname, "w", true);
+#endif
+  if (!f) {
+    MESH_DEBUG_PRINTLN("saveRTCTimestamp: unable to open %s", fname);
+    return;
+  }
+  uint32_t to_write = now;
+  f.write((uint8_t*)&to_write, sizeof(to_write));
+  f.close();
+  _last_rtc_saved = now;
+  MESH_DEBUG_PRINTLN("RTC saved: %u", (unsigned)now);
+}
+
+// --- Neuer Helper: Chat-Cache löschen (Posts, Indices, Zähler) ---
+void MyMesh::clearChatCache() {
+  // Clear in-memory post queue and counters
+  next_post_idx = 0;
+  next_client_idx = 0;
+  _num_posted = 0;
+  _num_post_pushes = 0;
+  memset(posts, 0, sizeof(posts));
+  MESH_DEBUG_PRINTLN("Chat cache cleared (posts reset)");
 }

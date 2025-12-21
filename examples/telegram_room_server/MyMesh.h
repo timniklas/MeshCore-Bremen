@@ -207,4 +207,16 @@ public:
 
   // Expose addPost so external injectors (e.g. Telegram fetcher) can add posts
   void addPost(ClientInfo* client, const char* postData);
+
+private:
+  bool lookupContactName(const uint8_t* pubkey, char* out_name, size_t out_len);
+  void saveContactEntry(ClientInfo* client);
+
+  // neu: clear stored chat cache (posts) when Telegram chat_id changes
+  void clearChatCache();
+
+  // neu: RTC persistenz helpers
+  void loadRTCTimestamp();
+  void saveRTCTimestamp();
+  uint32_t _last_rtc_saved; // last saved RTC seconds (throttle writes)
 };
