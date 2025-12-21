@@ -40,6 +40,37 @@
 
 #include <helpers/BaseChatMesh.h>
 
+#include <stdlib.h> // für rand()
+
+// Witzige Sprüche für das Display
+const char* funny_quotes[] = {
+  "Ping kam an. Welt noch da.",
+  "Mesh lebt. Keiner weiss warum.",
+  "Ping bestaetigt. Zweifel bleibt.",
+  "Noch nicht kaputt.",
+  "Signal da. Vertrauen nein.",
+  "Antwort kam durch. Realitaet wackelt.",
+  "Alles okay. Vermutlich.",
+  "Es reagiert. Ueberraschend.",
+  "Noch funktionsfaehig.",
+  "Ich sach mal so.",
+  "Das laeuft hier alles.",
+  "Is wie es is.",
+  "Das ist jetzt nicht optimal.",
+  "Lassen wir das mal so stehen.",
+  "Da koennte man jetzt diskutieren.",
+  "Da bin ich raus.",
+  "Das ist hier kein Ponyhof.",
+  "Man kann nicht alles haben.",
+  "Das war so nicht geplant.",
+  "Ich wuerde sagen: passt."
+};
+const size_t funny_quotes_count = sizeof(funny_quotes) / sizeof(funny_quotes[0]);
+
+// Zeitstempel des letzten empfangenen Pings (Millis)
+volatile uint32_t last_ping_display_ms = 0;
+volatile int last_ping_quote_idx = -1;
+#define PING_DISPLAY_DURATION_MS 5000
 #define SEND_TIMEOUT_BASE_MILLIS          500
 #define FLOOD_SEND_TIMEOUT_FACTOR         16.0f
 #define DIRECT_SEND_PERHOP_FACTOR         6.0f
@@ -201,6 +232,7 @@ struct NodePrefs {  // persisted to file
   float freq;
   uint8_t tx_power_dbm;
   uint8_t unused[3];
+  uint8_t echo_mode; // 0 = echo, 1 = funny
 };
 
 class MyMesh : public BaseChatMesh, ContactVisitor {
@@ -546,6 +578,7 @@ public:
     strcpy(_prefs.node_name, "PingBot HB");
     _prefs.freq = LORA_FREQ;
     _prefs.tx_power_dbm = LORA_TX_POWER;
+    _prefs.echo_mode = 0; // default: echo
 
     command[0] = 0;
     curr_recipient = NULL;
@@ -565,6 +598,7 @@ public:
 
   float getFreqPref() const { return _prefs.freq; }
   uint8_t getTxPowerPref() const { return _prefs.tx_power_dbm; }
+  const char* getNodeName() const { return _prefs.node_name; }
 
   void begin(FILESYSTEM& fs) {
     _fs = &fs;
@@ -608,9 +642,15 @@ public:
       File file = _fs->open("/node_prefs");
     #endif
       if (file) {
-        file.read((uint8_t *) &_prefs, sizeof(_prefs));
+        size_t sz = file.read((uint8_t *) &_prefs, sizeof(_prefs));
+        // fallback: falls alte Datei ohne echo_mode, Standard setzen
+        if (sz < sizeof(_prefs)) {
+          _prefs.echo_mode = 0; // default: echo
+        }
         file.close();
       }
+    } else {
+      _prefs.echo_mode = 0; // default: echo
     }
 
     loadContacts();
@@ -701,12 +741,26 @@ public:
         _prefs.tx_power_dbm = atoi(&config[3]);
         savePrefs();
         Serial.println("  OK - reboot to apply");
+      } else if (memcmp(config, "echomode ", 9) == 0) {
+        const char* mode = &config[9];
+        if (strcmp(mode, "echo") == 0) {
+          _prefs.echo_mode = 0;
+          savePrefs();
+          Serial.println("  OK - echo mode set to echo");
+        } else if (strcmp(mode, "fun") == 0) {
+          _prefs.echo_mode = 1;
+          savePrefs();
+          Serial.println("  OK - echo mode set to fun");
+        } else {
+          Serial.println("  ERROR: unknown echomode (use 'echo' or 'fun')");
+        }
       } else {
         Serial.printf("  ERROR: unknown config: %s\n", config);
       }
     } else if (memcmp(command, "help", 4) == 0) {
       Serial.println("Commands:");
-      Serial.println("   set {name|lat|lon|tx} {value}");
+      Serial.println("   set {name|lat|lon|tx|echomode} {value}");
+      Serial.println("      echomode: echo | fun");
       Serial.println("   advert");
       Serial.println("   clock");
       Serial.println("   time <epoch_seconds>");
@@ -753,18 +807,40 @@ public:
         }
 
         char replyText[MAX_TEXT_LEN];
-
         const char* mention = (pending_sender_name[0] != 0) ? pending_sender_name : "unknown";
 
-        // Erwähnung mit @[Absender] – SNR nur bei direkter Route ausgeben
-        if (pending_has_direct_snr) {
-          snprintf(replyText, sizeof(replyText),
-                   "@[%s] ECHO: %s (SNR: %s dB, Route: %s)",
-                   mention, pending_ping_body, snr_str, route_str);
+        int quote_idx = -1;
+        const char* funny = nullptr;
+
+        if (_prefs.echo_mode == 1) {
+          // Witzigen Spruch auswählen
+          quote_idx = random(funny_quotes_count);
+          funny = funny_quotes[quote_idx];
+        }
+
+        // Antwort zusammenbauen je nach Modus
+        if (_prefs.echo_mode == 1) {
+          // Fun Spruch
+          if (pending_has_direct_snr) {
+            snprintf(replyText, sizeof(replyText),
+                     "@[%s] %s (SNR: %s dB, Route: %s)",
+                     mention, funny, snr_str, route_str);
+          } else {
+            snprintf(replyText, sizeof(replyText),
+                     "@[%s] %s (Route: %s)",
+                     mention, funny, route_str);
+          }
         } else {
-          snprintf(replyText, sizeof(replyText),
-                   "@[%s] ECHO: %s (Route: %s)",
-                   mention, pending_ping_body, route_str);
+          // Klassisches Echo
+          if (pending_has_direct_snr) {
+            snprintf(replyText, sizeof(replyText),
+                     "@[%s] ECHO: %s (SNR: %s dB, Route: %s)",
+                     mention, pending_ping_body, snr_str, route_str);
+          } else {
+            snprintf(replyText, sizeof(replyText),
+                     "@[%s] ECHO: %s (Route: %s)",
+                     mention, pending_ping_body, route_str);
+          }
         }
 
         Serial.printf("   Sending delayed public echo -> \"%s\"\n", replyText);
@@ -797,6 +873,10 @@ public:
 
         // Reset pending state
         has_pending_echo = false;
+
+        // Nach Ping: Zeitstempel und Quote merken (nur für Anzeige)
+        last_ping_display_ms = millis();
+        last_ping_quote_idx = (quote_idx >= 0) ? quote_idx : 0;
         pending_ping_body[0] = 0;
         pending_sender_name[0] = 0;
         pending_snr = 0.0f;
@@ -806,22 +886,7 @@ public:
       }
     }
 
-#ifdef DISPLAY_CLASS
-    //update display
-    display.startFrame();
-    display.setCursor(0, 0);
-    display.print("< Ping Server >");
-    display.setCursor(0, 10);
-    display.print(_prefs.node_name);
-    display.setCursor(0, 50);
-    uint32_t now = getRTCClock()->getCurrentTime();
-    DateTime dt = DateTime(now);
-    char buffer[32];
-    sprintf(buffer, "%02d.%02d.%d %02d:%02d UTC",
-            dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
-    display.print(buffer);
-    display.endFrame();
-#endif
+// Displayanzeige ins loop() verschoben
   }
 };
 
@@ -882,4 +947,30 @@ void setup() {
 
 void loop() {
   the_mesh.loop();
+#ifdef DISPLAY_CLASS
+  static uint32_t last_display_update = 0;
+  uint32_t now_ms = millis();
+  if (now_ms - last_display_update > 200) { // max 5x pro Sekunde aktualisieren
+    last_display_update = now_ms;
+    display.startFrame();
+    display.setCursor(0, 0);
+    display.print("< Ping Server >");
+    display.setCursor(0, 10);
+    display.print(the_mesh.getNodeName());
+    if (last_ping_display_ms && (now_ms - last_ping_display_ms < PING_DISPLAY_DURATION_MS) && last_ping_quote_idx >= 0) {
+      display.setCursor(0, 30);
+      display.print("Ping empfangen!");
+      display.setCursor(0, 40);
+      display.print(funny_quotes[last_ping_quote_idx]);
+    }
+    display.setCursor(0, 50);
+    uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+    DateTime dt = DateTime(now);
+    char buffer[32];
+    sprintf(buffer, "%02d.%02d.%d %02d:%02d UTC",
+            dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+    display.print(buffer);
+    display.endFrame();
+  }
+#endif
 }
